@@ -1,0 +1,57 @@
+# Only for environments without a managed Postgres (RDS/Cloud SQL/etc).
+# For production, prefer a managed database — it handles backups, failover,
+# and patching that this bare StatefulSet does not.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vyapai-db
+  namespace: vyapai
+spec:
+  serviceName: vyapai-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vyapai-db
+  template:
+    metadata:
+      labels:
+        app: vyapai-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: vyapai
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vyapai-secrets
+                  key: DB_PASSWORD
+            - name: POSTGRES_DB
+              value: vyapai
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vyapai-db
+  namespace: vyapai
+spec:
+  selector:
+    app: vyapai-db
+  ports:
+    - port: 5432
+  clusterIP: None  # headless, for StatefulSet DNS

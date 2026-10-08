@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vyapai
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vyapai-config
+  namespace: vyapai
+data:
+  APP_ENV: "production"
+  MAX_AUTO_APPROVE_AMOUNT_INR: "50000"
+  # Non-secret endpoints go here. API keys/tokens go in vyapai-secrets (see secret.yaml.example) —
+  # never commit real values to this file.
+  BHASHINI_ENDPOINT: ""
+  GSP_BASE_URL: ""
+  OCEN_BASE_URL: ""
+  # Vision/OCR: model names are non-secret (the Gemini key itself lives in
+  # vyapai-secrets). Ollama is the free, self-hosted fallback when
+  # GEMINI_API_KEY is unset — point OLLAMA_BASE_URL elsewhere (a sidecar
+  # container, a shared GPU node) if not co-located with the API.
+  GEMINI_MODEL: "gemini-2.5-flash"
+  OLLAMA_BASE_URL: "http://localhost:11434"
+  OLLAMA_VISION_MODEL: "llama3.2-vision"

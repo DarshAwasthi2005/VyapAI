@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vyapai
+          POSTGRES_PASSWORD: vyapai
+          POSTGRES_DB: vyapai_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vyapai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: |
+          pip install ruff
+          ruff check app tests
+
+      - name: Type check (mypy, non-blocking for now)
+        run: |
+          pip install mypy
+          mypy app --ignore-missing-imports || true
+
+      - name: Run unit tests
+        env:
+          DATABASE_URL: postgresql+psycopg2://vyapai:vyapai@localhost:5432/vyapai_test
+          APP_ENV: test
+        run: pytest tests/ -v --cov=app --cov-report=term-missing
+
+  build-and-push:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/vyapai-api:latest
+            ghcr.io/${{ github.repository }}/vyapai-api:${{ github.sha }}

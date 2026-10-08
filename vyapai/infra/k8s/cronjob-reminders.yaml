@@ -1,0 +1,27 @@
+# Runs the collections sweep hourly: for every pending Payment, checks
+# app/services/collections.decide_next_reminder and sends via
+# integrations/whatsapp.send_payment_reminder where due.
+# Entrypoint: app/jobs/send_reminders.py
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vyapai-payment-reminders
+  namespace: vyapai
+spec:
+  schedule: "0 * * * *"  # hourly
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: send-reminders
+              image: vyapai-api:latest
+              command: ["python", "-m", "app.jobs.send_reminders"]
+              envFrom:
+                - configMapRef:
+                    name: vyapai-config
+                - secretRef:
+                    name: vyapai-secrets

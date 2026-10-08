@@ -1,0 +1,27 @@
+# Adjust ingressClassName and annotations to your cluster's ingress
+# controller (this example assumes ingress-nginx + cert-manager).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vyapai-api
+  namespace: vyapai
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"   # bill photos / voice notes
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.vyapai.example.com
+      secretName: vyapai-api-tls
+  rules:
+    - host: api.vyapai.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vyapai-api
+                port:
+                  number: 80

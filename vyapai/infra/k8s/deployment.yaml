@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vyapai-api
+  namespace: vyapai
+  labels:
+    app: vyapai-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vyapai-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: vyapai-api
+    spec:
+      # Run the migration as an init container so a bad migration blocks
+      # rollout instead of new pods serving traffic against a stale schema.
+      initContainers:
+        - name: migrate
+          image: vyapai-api:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: vyapai-config
+            - secretRef:
+                name: vyapai-secrets
+      containers:
+        - name: api
+          image: vyapai-api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: vyapai-config
+            - secretRef:
+                name: vyapai-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vyapai-api
+  namespace: vyapai
+spec:
+  selector:
+    app: vyapai-api
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vyapai-api-hpa
+  namespace: vyapai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vyapai-api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
