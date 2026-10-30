@@ -1,8 +1,10 @@
 FROM python:3.12-slim AS base
 
-# psycopg2-binary needs libpq at runtime; build-essential only needed transiently
+# psycopg2-binary ships its own libpq, so only the runtime library and
+# curl (for the HEALTHCHECK) are needed. Deliberately NO gcc/libpq-dev: a
+# compiler toolchain quadruples build time and image size for zero benefit.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq-dev gcc curl \
+        libpq5 curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
