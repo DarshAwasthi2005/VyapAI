@@ -10,7 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /srv
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Generous timeout + retries: a slow/flaky build network must not fail the
+# first deploy (Render's builders are fast, but this also helps local runs).
+RUN pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
 
 COPY app ./app
 COPY frontend ./frontend
