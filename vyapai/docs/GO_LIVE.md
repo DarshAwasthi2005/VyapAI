@@ -56,11 +56,13 @@ Chosen stack (validated in docs/ZERO_COST_BLUEPRINT.md):
    copy the connection string. Change the scheme to
    `postgresql+psycopg2://...` (SQLAlchemy driver inline).
 2. **Render** — sign up at https://render.com → **New → Blueprint** →
-   point it at your GitHub fork/clone of this repo (contains
-   [render.yaml](../render.yaml)). When prompted, paste the Neon string
-   as the `DATABASE_URL` value. Other env vars are pre-filled.
-   (No GitHub? New Web Service → Runtime **Docker** → same repo → set the
-   env vars from render.yaml manually.)
+   pick your GitHub repo. The app lives in the `vyapai/` subfolder, so set
+   **Root Directory = `vyapai`** (Blueprint field "Root Directory", or in
+   the service settings) — that is where [render.yaml](../render.yaml)
+   and the Dockerfile are found. When prompted, paste the Neon string as
+   the `DATABASE_URL` value. Other env vars are pre-filled.
+   (No Blueprint? New Web Service → Runtime **Docker**, repo → Root
+   Directory `vyapai` → set the env vars from render.yaml manually.)
 3. First deploy: Render builds the Dockerfile and boots; tables are
    created automatically (`APP_ENV=development` → `init_db()`).
    Check `https://<app>.onrender.com/health` → `{"status":"ok"}` and the
