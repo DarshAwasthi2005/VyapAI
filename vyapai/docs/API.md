@@ -37,15 +37,19 @@ or, when the guardrail agent flags something:
 
 Request body:
 ```json
-{"from_number": "+91XXXXXXXXXX", "message_text": "Send 5 bags of sugar and 2 cartons of soap by 4 PM"}
+{"from_number": "+91XXXXXXXXXX", "message_text": "Send 7 bags of sugar by 4 PM"}
 ```
+
+Orders are one entry at a time: only the first "quantity unit item" match in
+the message is the order — extra items are ignored, so send them as separate
+orders.
 
 Response:
 ```json
 {
   "order_id": "<uuid>",
   "status": "confirmed",
-  "total_amount": 270.0,
+  "total_amount": 294.0,
   "upi_link": "upi://pay?pa=...",
   "parse_confidence": "high"
 }

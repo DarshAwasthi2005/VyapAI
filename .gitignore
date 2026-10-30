@@ -1,0 +1,4 @@
+# Runtime artifacts and local environment — never commit
+*.log
+.venv/
+.freebuff/

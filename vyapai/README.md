@@ -7,9 +7,8 @@ two agent engines, sharing a ledger:
   in Hindi/Tamil/Gujarati/etc., or photos of handwritten bills). The system turns
   that into double-entry accounting, GST-reconciled records, e-way bills, and a
   standardized loan-readiness packet submitted over OCEN.
-- **B2C Engine** — a retail buyer orders over WhatsApp in their own words
-  ("5 bags of sugar and 2 cartons of soap by 4 PM"), the agent checks inventory,
-  sends a UPI payment link, and runs a polite, escalating reminder sequence for
+- **B2C Engine** — a retail buyer orders over WhatsApp in their own words, one
+  item at a time ("7 bags of sugar by 4 PM"), the agent checks inventory, sends a UPI payment link, and runs a polite, escalating reminder sequence for
   anything left unpaid.
 
 Both engines write to the same merchant ledger, so a WhatsApp sale updates the
@@ -87,8 +86,27 @@ docs/                      Architecture, API reference, compliance checklist
 cp .env.example .env            # fill in what you have; stubs work with placeholders
 docker compose up --build       # api + postgres
 # API docs at http://localhost:8000/docs
-pytest tests/ -v                # business-logic + guardrail tests (no external creds needed)
+pytest tests/ -v                # 65 tests, no external creds needed
 ```
+
+## Running it at ₹0 — the zero-cost stack
+
+Every capability below runs on documented free tiers (verified limits and
+honest caveats in `docs/ZERO_COST_BLUEPRINT.md`). With no keys at all the app
+still boots and all 65 tests pass — adapters fail loud only when actually
+called:
+
+| Capability | ₹0 way | Env vars / notes |
+|---|---|---|
+| Handwritten-bill OCR + transcript structuring | **Groq free tier** (`integrations/vision.py`, `integrations/llm_text.py`) — no card; falls back to Gemini, then local Ollama | `GROQ_API_KEY` from [console.groq.com](https://console.groq.com) |
+| Vernacular ASR | **Vosk self-hosted server** (`integrations/speech.py`) — Apache-2.0 models, no per-minute cost | `VOSK_ENDPOINT` (tiny HTTP wrapper around Vosk) |
+| Voice notes & bill photos | **Cloudflare R2 10 GB free tier** (`integrations/media.py`), local filesystem by default in dev | `MEDIA_BACKEND=r2` + `R2_*` vars (needs `pip install boto3`) |
+| Messaging (pilot channel) | **Telegram bot — free, no per-message cost** (`integrations/telegram.py`, webhook at `/webhooks/telegram`) | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_SECRET_TOKEN` |
+| Messaging (later channel) | WhatsApp Cloud API (`integrations/whatsapp.py`) — free inside the 24h window; template messages outside it cost ~₹0.115/utility | `WHATSAPP_*` vars |
+| Money correctness | Integer-paise math (`app/utils/money.py`) + `Numeric(14,2)` columns; migration `0002_money_numeric_and_audit_events.py` | automatic — no keys |
+| Audit trail | Immutable `audit_events` table (`app/services/audit.py`), wired into ledger posts, approval decisions and payment-status changes | automatic |
+| PII discipline | Phone numbers masked to `[PHONE_n]` tokens before any hosted-LLM call (`services/text_structuring.py`) — Gemini/Groq free-tier terms never see raw personal data | automatic |
+| Hosting / CI / DB / backups | Oracle Always-Free VM or Render Free · GitHub Actions · Neon free Postgres · nightly `pg_dump` → R2 | see blueprint |
 
 ## What you plug in for a real deployment
 

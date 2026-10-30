@@ -19,6 +19,7 @@ from app.agents.guardrails import validate_bill_extraction
 from app.integrations import speech, vision
 from app.integrations.errors import NotConfiguredError, UpstreamError
 from app.services.accounting import build_purchase_transaction, build_sale_transaction
+from app.services.text_structuring import structure_transcript
 
 
 class B2BState(TypedDict, total=False):
@@ -45,8 +46,29 @@ def node_ingest(state: B2BState) -> B2BState:
         if state["input_mode"] == "voice" and state.get("audio_bytes"):
             result = speech.transcribe(state["audio_bytes"])
             state["raw_text"] = result.text
-            # A second LLM pass would structure raw_text into line items —
-            # left to a text-completion call alongside vision.py's pattern.
+            # Structure the transcript into line items via the FREE hosted
+            # tiers (llm_text). No backend configured -> NotConfiguredError
+            # -> needs_human_approval, never a silent skip.
+            structured = structure_transcript(
+                result.text, hint_language=result.language
+            )
+            state["party_name"] = structured.party_name
+            state["transaction_kind"] = structured.transaction_kind
+            state["stated_total"] = structured.stated_total
+            triples: list[tuple[float, float, float]] = []
+            incomplete = False
+            for li in structured.line_items:
+                qty, price, amount = li["quantity"], li["unit_price"], li["amount"]
+                if qty is None or price is None or amount is None:
+                    incomplete = True  # never guess money — hold for review
+                else:
+                    triples.append((float(qty), float(price), float(amount)))
+            state["line_items"] = triples
+            if incomplete:
+                state["error"] = (
+                    "Transcript had line items missing quantity/price/amount; "
+                    "held for human review instead of guessing money."
+                )
         elif state["input_mode"] == "photo" and state.get("image_bytes"):
             extraction = vision.extract_bill(state["image_bytes"])
             state["party_name"] = extraction.party_name

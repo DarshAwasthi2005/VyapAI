@@ -1,0 +1,35 @@
+# Render Blueprint for VyapAI — one-click deploy of the FastAPI app.
+#
+# Prereq: create a free Postgres at https://neon.com first, copy its
+# connection string (keep the +psycopg2 form, see README), then create the
+# service:
+#   Render dashboard → New → Blueprint → point at this repo
+# (or New Web Service → Docker and paste the env vars below manually).
+#
+# The free plan sleeps after ~15 min idle and cold-wakes in ~60s — fine for
+# a demo/pilot; the sleep does not affect Telegram webhook delivery once a
+# real traffic pattern exists (Telegram retries).
+services:
+  - type: web
+    name: vyapai
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    # .env.example stays authoritative for every optional integration var —
+    # add GROQ_API_KEY / TELEGRAM_* etc. in the dashboard when you get them.
+    envVars:
+      - key: APP_ENV
+        value: development   # demo deploy: init_db() creates tables; no WHATSAPP_APP_SECRET needed yet
+      - key: DATABASE_URL
+        sync: false          # paste your Neon string in the dashboard (postgres+psycopg2://…)
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MAX_AUTO_APPROVE_AMOUNT_INR
+        value: "50000"
+      - key: MEDIA_BACKEND
+        value: local         # ephemeral on free tier; set r2 + R2_* vars for durable media
+      # Live bot (add when ready):
+      # - key: TELEGRAM_BOT_TOKEN
+      #   sync: false
+      # - key: TELEGRAM_SECRET_TOKEN
+      #   generateValue: true

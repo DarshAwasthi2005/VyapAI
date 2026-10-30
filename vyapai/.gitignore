@@ -12,3 +12,11 @@ htmlcov/
 infra/k8s/secret.yaml
 *.db
 .DS_Store
+
+# --- runtime artifacts (never commit) ---
+*.log
+docker-build.log
+.telegram-offset
+.media/
+.asr/
+*.mp3

@@ -71,16 +71,76 @@ class BillExtraction:
 
 
 def extract_bill(image_bytes: bytes, media_type: str = "image/jpeg") -> BillExtraction:
+    """Backend order (all free, see docs/ZERO_COST_BLUEPRINT.md):
+    Gemini -> Groq -> Ollama. Gemini's free tier may use inputs to improve
+    its products, so prefer Groq for real merchant bills."""
     if settings.gemini_api_key:
         raw = _call_gemini_vision(image_bytes, media_type)
+    elif settings.groq_api_key:
+        raw = _call_groq_vision(image_bytes, media_type)
     elif settings.ollama_base_url and settings.ollama_vision_model:
         raw = _call_ollama_vision(image_bytes)
     else:
         raise NotConfiguredError(
-            "vision/OCR", ["GEMINI_API_KEY", "or OLLAMA_BASE_URL + OLLAMA_VISION_MODEL"]
+            "vision/OCR",
+            ["GEMINI_API_KEY", "or GROQ_API_KEY", "or OLLAMA_BASE_URL + OLLAMA_VISION_MODEL"],
         )
 
     return _parse_extraction(raw)
+
+
+def _call_groq_vision(image_bytes: bytes, media_type: str) -> str:
+    """POST to Groq's OpenAI-compatible chat endpoint.
+
+    Groq's free tier (no card needed, key from https://console.groq.com/keys)
+    handles vision via models like llama-4-scout. Unlike the Gemini free
+    tier, Groq documents that inference inputs/outputs are not retained by
+    default, which is why it is preferred for real merchant bills.
+    """
+    try:
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            json={
+                "model": settings.groq_vision_model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": EXTRACTION_PROMPT},
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{media_type};base64,"
+                                   f"{base64.b64encode(image_bytes).decode()}"
+                        }},
+                    ],
+                }],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            raise UpstreamError(
+                "Groq free-tier rate limit hit — wait and retry, or unset "
+                "GROQ_API_KEY to fall back to the local Ollama backend."
+            ) from e
+        if e.response.status_code in (401, 403):
+            raise UpstreamError(
+                "Groq rejected the API key — check GROQ_API_KEY in .env "
+                "(get a fresh one at https://console.groq.com/keys)."
+            ) from e
+        raise UpstreamError(
+            f"Groq vision call failed ({e.response.status_code}): {e.response.text[:200]}"
+        ) from e
+    except httpx.HTTPError as e:
+        raise UpstreamError(f"Groq vision call failed: {e}") from e
+
+    try:
+        choice = resp.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError) as e:
+        raise UpstreamError(f"Unexpected Groq response shape: {resp.text[:200]}") from e
+    return choice
 
 
 def _call_gemini_vision(image_bytes: bytes, media_type: str) -> str:

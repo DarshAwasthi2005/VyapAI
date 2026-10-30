@@ -2,7 +2,6 @@ import pytest
 
 from app.enums import EntryType
 from app.services.accounting import (
-    UnbalancedTransactionError,
     build_purchase_transaction,
     build_sale_transaction,
     reconcile_input_tax_credit,
@@ -10,27 +9,31 @@ from app.services.accounting import (
 )
 
 
-def test_sale_transaction_balances():
+def test_sale_is_exactly_one_entry():
+    """Simple books: one business event writes exactly ONE ledger row."""
     txn = build_sale_transaction(taxable_value=1000.0, gst_rate=18.0, party="Ramesh Kirana", source="voice_note")
-    assert txn.is_balanced()
-    debit_total = sum(l.amount for l in txn.lines if l.entry_type == EntryType.DEBIT)
-    credit_total = sum(l.amount for l in txn.lines if l.entry_type == EntryType.CREDIT)
-    assert debit_total == pytest.approx(1180.0)
-    assert credit_total == pytest.approx(1180.0)
+    assert len(txn.lines) == 1
+    line = txn.lines[0]
+    assert line.account == "Sales"          # money in
+    assert line.entry_type == EntryType.CREDIT
+    assert line.amount == pytest.approx(1180.0)   # value + GST, what the merchant actually received
+    assert line.gst_rate == 18.0            # tax kept on the row for reports
 
 
-def test_sale_transaction_zero_gst_still_balances():
+def test_sale_zero_gst_is_one_entry_at_face_value():
     txn = build_sale_transaction(taxable_value=500.0, gst_rate=0.0, party="Local buyer", source="manual")
-    assert txn.is_balanced()
-    # No GST line should be added when rate is 0
-    assert not any(l.account == "Output GST Payable" for l in txn.lines)
+    assert len(txn.lines) == 1
+    assert txn.lines[0].amount == pytest.approx(500.0)
 
 
-def test_purchase_transaction_balances_with_input_credit():
+def test_purchase_is_exactly_one_entry():
     txn = build_purchase_transaction(taxable_value=2000.0, gst_rate=12.0, party="Wholesaler", source="bill_photo")
-    assert txn.is_balanced()
-    input_credit = next(l for l in txn.lines if l.account == "Input GST Credit")
-    assert input_credit.amount == pytest.approx(240.0)
+    assert len(txn.lines) == 1
+    line = txn.lines[0]
+    assert line.account == "Purchase"       # money out
+    assert line.entry_type == EntryType.DEBIT
+    assert line.amount == pytest.approx(2240.0)   # value + GST
+    assert line.gst_rate == 12.0
 
 
 def test_negative_taxable_value_rejected():

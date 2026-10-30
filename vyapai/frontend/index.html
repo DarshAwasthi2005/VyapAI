@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VyapAI — Your Business, Your Books, Automatically</title>
+<link rel="stylesheet" href="styles.css?v=11">
+</head>
+<body>
+
+<!-- ============ 1. WELCOME / ONBOARDING ============ -->
+<section id="onboarding" class="screen">
+  <div class="onboard-card">
+    <div class="brand">
+      <span class="brand-mark">₹</span>
+      <h1>VyapAI</h1>
+    </div>
+    <p class="tagline">First, let's set up your shop. Fill your details once — your books, orders and payments are handled automatically from here on.</p>
+
+    <div class="identity-tabs" id="ob-tabs">
+      <button type="button" class="tab active" data-channel="phone">📱 Phone</button>
+      <button type="button" class="tab" data-channel="email">📧 Email</button>
+    </div>
+
+    <form id="onboarding-form" autocomplete="off">
+      <label>Business name <span class="req">*</span>
+        <input id="ob-name" type="text" required placeholder="e.g. Sharma Kirana Store" maxlength="80">
+      </label>
+
+      <label>GSTIN <span class="opt">(optional)</span>
+        <input id="ob-gstin" type="text" placeholder="e.g. 22AAAAA0000A1Z5" maxlength="15">
+      </label>
+
+      <label id="ob-phone-label">WhatsApp number <span class="req">*</span>
+        <input id="ob-wa" type="tel" placeholder="e.g. 9876543210" maxlength="15" inputmode="numeric">
+      </label>
+
+      <label id="ob-email-label" class="hidden">Email address <span class="req">*</span>
+        <input id="ob-email" type="email" placeholder="e.g. sharma@gmail.com" maxlength="80">
+      </label>
+
+      <label>UPI ID (VPA) <span class="opt">(for receiving payments)</span>
+        <input id="ob-vpa" type="text" placeholder="e.g. sharma@okicici" maxlength="60">
+      </label>
+
+      <label>Choose a login PIN <span class="req">*</span>
+        <input id="ob-pin" type="password" required placeholder="4–8 digits — you'll use this to sign back in" maxlength="8" inputmode="numeric" pattern="\d{4,8}" autocomplete="new-password">
+      </label>
+
+      <label>Preferred language
+        <select id="ob-lang">
+          <option value="hi">हिन्दी — Hindi</option>
+          <option value="en">English</option>
+          <option value="gu">ગુજરાતી — Gujarati</option>
+          <option value="mr">मराठी — Marathi</option>
+          <option value="bn">বাংলা — Bengali</option>
+          <option value="ta">தமிழ் — Tamil</option>
+          <option value="te">తెలుగు — Telugu</option>
+          <option value="kn">ಕನ್ನಡ — Kannada</option>
+          <option value="pa">ਪੰਜਾਬੀ — Punjabi</option>
+        </select>
+      </label>
+
+      <button type="submit" class="btn primary big" id="ob-submit">Create my business →</button>
+      <p id="ob-error" class="error hidden"></p>
+    </form>
+
+    <div class="returning">
+      <button type="button" class="btn ghost big" id="go-login">Already have a shop? Sign in →</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 1b. LOGIN (returning merchants) ============ -->
+<section id="login" class="screen hidden">
+  <div class="onboard-card">
+    <div class="brand">
+      <span class="brand-mark">₹</span>
+      <h1>VyapAI</h1>
+    </div>
+    <p class="tagline">Welcome back. Sign in to your shop — we send you a 6-digit code.</p>
+
+    <div id="login-step-number">
+      <div class="identity-tabs" id="lg-tabs">
+        <button type="button" class="tab active" data-channel="phone">📱 Phone</button>
+        <button type="button" class="tab" data-channel="email">📧 Email</button>
+      </div>
+      <form id="login-form-number" autocomplete="off">
+        <label id="lg-phone-label">Shop WhatsApp number <span class="req">*</span>
+          <input id="lg-wa" type="tel" placeholder="e.g. 9876543210" maxlength="15" inputmode="numeric">
+        </label>
+        <label id="lg-email-label" class="hidden">Shop email address <span class="req">*</span>
+          <input id="lg-email" type="email" placeholder="e.g. sharma@gmail.com" maxlength="80">
+        </label>
+        <button type="submit" class="btn primary big" id="lg-send">Send my code →</button>
+        <p id="lg-error" class="error hidden"></p>
+      </form>
+      <div class="returning">
+        <button type="button" class="btn ghost big" id="go-register">New shopkeeper? Register your business →</button>
+      </div>
+    </div>
+
+    <div id="login-step-verify" class="hidden">
+      <p class="muted" id="lg-code-sent"></p>
+      <form id="login-form-verify" autocomplete="off">
+        <label>6-digit code
+          <input id="lg-otp" type="text" required placeholder="e.g. 482913" maxlength="6" inputmode="numeric">
+        </label>
+        <button type="submit" class="btn primary big" id="lg-verify">Verify & enter dashboard →</button>
+        <p class="muted smallhint" id="lg-hint-dev"></p>
+        <p id="lg-error-verify" class="error hidden"></p>
+        <button type="button" class="btn ghost tiny" id="lg-resend">← Use a different number</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2. DASHBOARD ============ -->
+<section id="dashboard" class="screen hidden">
+  <header class="topbar">
+    <div class="brand small"><span class="brand-mark">₹</span><h2>VyapAI</h2></div>
+    <div id="shop-name" class="shop-name"></div>
+    <select id="dash-lang" class="topbar-select" title="Language for your dashboard and agent messages">
+      <option value="hi">हिन्दी</option>
+      <option value="en">English</option>
+      <option value="gu">ગુજરાતી</option>
+      <option value="mr">मराठी</option>
+      <option value="bn">বাংলা</option>
+      <option value="ta">தமில்</option>
+      <option value="te">తెలుగు</option>
+      <option value="kn">ಕನ್ನಡ</option>
+      <option value="pa">ਪੰਜਾਬੀ</option>
+    </select>
+    <button class="btn ghost" id="help-btn" data-i18n="help_btn">❓ Help</button>
+    <button class="btn ghost" id="switch-shop" data-i18n="signout">Sign out</button>
+  </header>
+
+  <main class="wrap">
+    <!-- stat cards -->
+    <div class="stats">
+      <div class="stat"><span class="stat-label" data-i18n="stat_sales">Sales posted</span><span class="stat-value" id="stat-sales">₹0.00</span></div>
+      <div class="stat"><span class="stat-label" data-i18n="stat_purch">Purchases</span><span class="stat-value" id="stat-purch">₹0.00</span></div>
+      <div class="stat"><span class="stat-label" data-i18n="stat_orders">Orders</span><span class="stat-value" id="stat-orders">0</span></div>
+      <div class="stat"><span class="stat-label" data-i18n="stat_pending">Pending payments</span><span class="stat-value" id="stat-pending">₹0.00</span></div>
+    </div>
+
+    <div class="grid">
+      <!-- ledger entry -->
+      <div class="card" id="card-entry">
+        <h3 data-i18n="entry_title">📝 Add a book entry</h3>
+        <p class="hint" data-i18n="entry_hint">Type what happened — every entry is recorded once, exactly as you made it.</p>
+        <form id="entry-form">
+          <label><span data-i18n="l_kind">Sale or purchase</span>
+            <select id="entry-kind">
+              <option value="sale" data-i18n="o_sale">Sale (I sold something)</option>
+              <option value="purchase" data-i18n="o_purchase">Purchase (I bought something)</option>
+            </select>
+          </label>
+          <label id="party-label"><span data-i18n="l_party">Party name</span> <span class="req">*</span>
+            <input id="entry-party" type="text" required maxlength="60">
+          </label>
+          <label><span data-i18n="l_amount">Amount (₹)</span> <span class="req">*</span>
+            <input id="entry-amount" type="number" step="0.01" min="0.01" max="5000000" required>
+          </label>
+          <label><span data-i18n="l_gst">GST rate</span>
+            <select id="entry-gst">
+              <option value="0" data-i18n="o_gstnone">0% — none</option>
+              <option value="5">5%</option>
+              <option value="12">12%</option>
+              <option value="18">18%</option>
+              <option value="28">28%</option>
+            </select>
+          </label>
+          <button class="btn primary" type="submit" data-i18n="btn_post">Post entry</button>
+          <p class="feedback" id="entry-feedback"></p>
+        </form>
+      </div>
+
+      <!-- place order -->
+      <div class="card" id="card-order">
+        <h3 data-i18n="order_title">🛒 Place a customer order</h3>
+                <p class="hint" data-i18n="order_hint">One item per order — enter one, then the next. Try: <em>"3 kg sugar by 4 PM"</em>. Demo stock: sugar, soap.</p>
+        <p class="hint" style="margin-top:-6px">WhatsApp-connected: orders texted, voice-noted or sent as a list photo to the linked chat land in the table below — quantity and unit included.</p>
+        <form id="order-form">
+          <label><span data-i18n="l_buyer">Buyer WhatsApp number</span> <span class="req">*</span>
+            <input id="order-buyer" type="tel" required maxlength="15" inputmode="numeric" value="9876500001">
+          </label>
+          <label><span data-i18n="l_order">Order — quantity, unit and item</span> <span class="req">*</span>
+            <input id="order-text" type="text" required placeholder="3 kg sugar by 4 PM" maxlength="60">
+          </label>
+          <label><span data-i18n="l_offer">Offer</span> <span class="opt" data-i18n="offer_hint">(optional — percent or cash, your choice)</span>
+            <span class="offer-row">
+              <select id="offer-type">
+                <option value="percent" data-i18n="o_percent">% percent off</option>
+                <option value="cash" data-i18n="o_cash">₹ cash off</option>
+              </select>
+              <input id="offer-value" type="number" min="0" step="0.01" placeholder="e.g. 10" style="flex:1">
+            </span>
+          </label>
+          <button class="btn primary" type="submit" data-i18n="btn_order">Send to agent</button>
+          <p class="feedback" id="order-feedback"></p>
+        </form>
+      </div>
+
+      <!-- loan readiness -->
+      <div class="card" id="card-loan">
+        <h3 data-i18n="loan_title">🏦 Loan readiness pre-check</h3>
+        <p class="hint" data-i18n="loan_hint">See how the OCEN pre-screen scores your books. No credit impact.</p>
+        <form id="loan-form">
+          <label><span data-i18n="loan_amount">Loan amount (₹)</span> <span class="req">*</span>
+            <input id="loan-amount" type="number" step="1000" min="1000" max="5000000" required>
+          </label>
+          <label><span data-i18n="loan_purpose">Purpose</span> <span class="req">*</span>
+            <input id="loan-purpose" type="text" required maxlength="60" placeholder="e.g. stock purchase">
+          </label>
+          <button class="btn primary" type="submit" data-i18n="btn_loan">Check score</button>
+          <pre class="feedback json" id="loan-feedback"></pre>
+        </form>
+      </div>
+    </div>
+
+    <!-- channels: Telegram + WhatsApp linking -->
+    <div class="card wide" id="card-channels">
+      <h3 data-i18n="channels_title">🔗 Channels — Telegram &amp; WhatsApp</h3>
+      <p class="hint" data-i18n="channels_hint">Connect your shop's messaging. Telegram OTP login and order intake work the moment each channel shows Ready.</p>
+      <div class="channels-grid">
+        <div class="channel" id="channel-telegram">
+          <div class="ch-head"><strong>Tel</strong> Telegram <span class="chip" id="tg-status">checking…</span></div>
+          <p class="muted" id="tg-detail"></p>
+          <button class="btn tiny approve" id="tg-link-btn">Link via /start code</button>
+          <div id="wiz-host"><div id="tg-wizard" class="hidden"></div></div>
+        </div>
+        <div class="channel" id="channel-whatsapp">
+          <div class="ch-head"><strong>Wa</strong> WhatsApp <span class="chip" id="wa-status">checking…</span></div>
+          <p class="muted" id="wa-detail"></p>
+          <button class="btn tiny approve" id="wa-link-btn">Simulate first-contact link</button>
+        </div>
+      </div>
+      <p class="muted smallhint" style="margin-top:8px">Setup keys live in the server env, never in this page: TELEGRAM_BOT_TOKEN / WHATSAPP_TOKEN + WHATSAPP_PHONE_NUMBER_ID (see .env.example).</p>
+    </div>
+
+    <!-- approvals -->
+    <div class="card wide" id="card-approvals">
+      <h3 data-i18n="approv_title">🧾 Pending approvals</h3>
+      <p class="hint" data-i18n="approv_hint">Sensitive actions (large entries etc.) wait here for a human yes/no.</p>
+      <div id="approvals-list" class="list"></div>
+    </div>
+
+    <!-- ledger -->
+    <div class="card wide">
+      <h3 data-i18n="ledger_title">📖 Ledger</h3>
+      <div class="table-scroller"><table id="ledger-table">
+        <thead><tr><th data-i18n="th_when">When</th><th data-i18n="th_kind">Kind</th><th data-i18n="th_details">Details</th><th data-i18n="th_amount">Amount</th><th data-i18n="th_gst">GST</th><th data-i18n="th_source">Source</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <!-- orders -->
+    <div class="card wide">
+      <h3 data-i18n="orders_title">📦 Orders &amp; payments</h3>
+      <div class="table-scroller"><table id="orders-table">
+        <thead><tr><th data-i18n="th_when">When</th><th data-i18n="th_items">Items</th><th data-i18n="th_buyer">Buyer</th><th data-i18n="th_offer">Offer</th><th data-i18n="th_total">Total</th><th data-i18n="th_status">Status</th><th data-i18n="th_payment">Payment</th><th data-i18n="th_action">Action</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+
+    <!-- help modal (opened from the topbar) -->
+    <div id="help-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="help-title">
+      <div class="modal-backdrop" id="help-backdrop"></div>
+      <div class="modal-card">
+        <button class="modal-x" id="help-close-x" type="button" title="Close">✕</button>
+        <h3 id="help-title" data-i18n="help_title">❓ Help — quick answers</h3>
+        <div class="help-block">
+          <h4 data-i18n="help_h1">🧾 Book entries</h4>
+          <p data-i18n="help_y1">Add a book entry — sale or purchase, party, amount, GST. Every entry is posted to a double-entry group exactly once; large or unusual entries land in Pending approvals for your yes/no.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h2">📦 Customer orders</h4>
+          <p data-i18n="help_y2">Place them from the dashboard or let customers send them to your linked WhatsApp — typed text, a voice note, or a photo of a handwritten list all become real orders with quantity and unit. Voice/photo paths need ASR/OCR keys on the server (GEMINI_API_KEY / VOSK_ENDPOINT) — until then customers are asked to type.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h3">🎯 Offers</h4>
+          <p data-i18n="help_y3">When making a bill, pick % percent off or ₹ cash off and type the value — the discount shows in the Offer column and reduces the total automatically.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h4">💸 Payments</h4>
+          <p data-i18n="help_y4">UPI orders confirm themselves the moment the payment link is generated. Cash orders wait for you to tap 💵 Confirm cash in the orders table — nothing is counted until you do.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h5">🔗 Channels</h4>
+          <p data-i18n="help_y5">Link Telegram (for login codes) with the /start code, and WhatsApp via first contact. Server keys live in the env file, never in this page — see .env.example.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h6">🌐 Language</h4>
+          <p data-i18n="help_y6">The selector in the topbar sets the language this dashboard and your agent's messages use. It saves instantly.</p>
+        </div>
+        <div class="help-block">
+          <h4 data-i18n="help_h7">🏦 Loan pre-check</h4>
+          <p data-i18n="help_y7">Score your books against an OCEN-style pre-screen before applying — soft check, no credit impact.</p>
+        </div>
+        <p class="smallhint" style="margin-top:12px" data-i18n="help_smallhint">Stuck on something not covered here? Message the shop's linked Telegram chat — the agent answers in your preferred language.</p>
+      </div>
+    </div>
+
+    <p class="demo-note" data-i18n="demo_note">Demo mode: UPI payments confirm themselves the moment the order is placed (a licensed PSP webhook keeps it authoritative at go-live); cash orders wait for you to tap <strong>💵 Confirm cash</strong>. Login is real: your shop is protected by phone/email + a 6-digit OTP.</p>
+  </main>
+</section>
+
+<script src="i18n.js?v=12"></script>
+<script src="app.js?v=12"></script>
+</body>
+</html>

@@ -1,7 +1,12 @@
 """
-Double-entry bookkeeping core. This is the one part of the system that must
-never be "roughly right" — every function here is deterministic, has no
-external dependency, and is covered by tests/test_accounting.py.
+Simple single-entry bookkeeping core. This is the one part of the system
+that must never be "roughly right" — every function here is deterministic,
+has no external dependency, and is covered by tests/test_accounting.py.
+
+ONE business event = ONE ledger row. A sale row records money IN (`Sales`,
+a credit), a purchase row records money OUT (`Purchase`, a debit), each
+with the amount the merchant actually moved (value + GST) and the GST rate
+kept as a column so tax reports stay computable later.
 """
 from __future__ import annotations
 
@@ -28,22 +33,13 @@ class LedgerTransaction:
     lines: list[LedgerLine] = field(default_factory=list)
     source: str = "manual"
 
-    def is_balanced(self) -> bool:
-        debits = round(sum(l.amount for l in self.lines if l.entry_type == EntryType.DEBIT), ROUNDING)
-        credits = round(sum(l.amount for l in self.lines if l.entry_type == EntryType.CREDIT), ROUNDING)
-        return debits == credits
-
-
-class UnbalancedTransactionError(ValueError):
-    pass
-
 
 def build_sale_transaction(
     *, taxable_value: float, gst_rate: float, party: str, source: str, memo: str | None = None
 ) -> LedgerTransaction:
-    """A single sale: Debit Cash/Debtors for (value+GST), Credit Sales for the
-    taxable value, Credit Output GST for the tax portion. This is the
-    standard Indian GST sales entry shape."""
+    """A single sale = ONE ledger row: money the merchant received
+    (item value + GST). The tax rate is kept on the row so output GST can
+    be recomputed for filings without a second row."""
     if taxable_value <= 0:
         raise ValueError("taxable_value must be positive")
     if gst_rate < 0:
@@ -51,44 +47,30 @@ def build_sale_transaction(
 
     gst_amount = round(taxable_value * gst_rate / 100, ROUNDING)
     total = round(taxable_value + gst_amount, ROUNDING)
-    group = str(uuid.uuid4())
 
-    lines = [
-        LedgerLine("Debtors/Cash", EntryType.DEBIT, total, gst_rate, memo or f"Sale to {party}"),
-        LedgerLine("Sales", EntryType.CREDIT, taxable_value, gst_rate, memo),
-    ]
-    if gst_amount > 0:
-        lines.append(LedgerLine("Output GST Payable", EntryType.CREDIT, gst_amount, gst_rate, memo))
-
-    txn = LedgerTransaction(transaction_group=group, lines=lines, source=source)
-    if not txn.is_balanced():
-        raise UnbalancedTransactionError(f"Sale transaction did not balance: {txn.lines}")
-    return txn
+    return LedgerTransaction(
+        transaction_group=str(uuid.uuid4()),
+        lines=[LedgerLine("Sales", EntryType.CREDIT, total, gst_rate, memo or f"Sale to {party}")],
+        source=source,
+    )
 
 
 def build_purchase_transaction(
     *, taxable_value: float, gst_rate: float, party: str, source: str, memo: str | None = None
 ) -> LedgerTransaction:
-    """A purchase (for input tax credit reconciliation): Debit Purchases and
-    Input GST Credit, Credit Creditors/Cash."""
+    """A single purchase = ONE ledger row: money the merchant paid
+    (item value + GST), with the GST rate kept for input-credit reports."""
     if taxable_value <= 0:
         raise ValueError("taxable_value must be positive")
 
     gst_amount = round(taxable_value * gst_rate / 100, ROUNDING)
     total = round(taxable_value + gst_amount, ROUNDING)
-    group = str(uuid.uuid4())
 
-    lines = [
-        LedgerLine("Purchases", EntryType.DEBIT, taxable_value, gst_rate, memo or f"Purchase from {party}"),
-    ]
-    if gst_amount > 0:
-        lines.append(LedgerLine("Input GST Credit", EntryType.DEBIT, gst_amount, gst_rate, memo))
-    lines.append(LedgerLine("Creditors/Cash", EntryType.CREDIT, total, gst_rate, memo))
-
-    txn = LedgerTransaction(transaction_group=group, lines=lines, source=source)
-    if not txn.is_balanced():
-        raise UnbalancedTransactionError(f"Purchase transaction did not balance: {txn.lines}")
-    return txn
+    return LedgerTransaction(
+        transaction_group=str(uuid.uuid4()),
+        lines=[LedgerLine("Purchase", EntryType.DEBIT, total, gst_rate, memo or f"Purchase from {party}")],
+        source=source,
+    )
 
 
 def reconcile_input_tax_credit(purchase_gst_amounts: list[float], output_gst_amounts: list[float]) -> dict:
