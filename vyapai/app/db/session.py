@@ -13,10 +13,35 @@ engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+def _add_missing_columns() -> None:
+    """create_all() never ALTERs existing tables, so a dev DB created before
+    a column was added keeps the old shape forever — and then every ORM
+    query on that table fails. Reconcile the SQLite dev DB with the models
+    by adding columns that are missing (all late additions are nullable, so
+    a plain ADD COLUMN works)."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if insp.dialect.name != "sqlite":
+        return
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                col_type = col.type.compile(engine.dialect)
+                conn.execute(text(
+                    f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col_type} NULL"))
+
+
 def init_db() -> None:
     """Create tables. In production, use Alembic migrations instead —
     this is here for local/dev bring-up and tests."""
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()
 
 
 @contextmanager

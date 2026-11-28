@@ -24,6 +24,7 @@ from app.integrations import whatsapp
 from app.integrations.errors import NotConfiguredError
 from app.services import auth as authsvc
 from app.services import channels as channelsvc
+from app.services import fulfillment
 from app.services import order_intake
 from tests.conftest import patch_settings
 
@@ -190,16 +191,16 @@ def test_intake_creates_order_for_linked_telegram_chat(db):
                                         "Send 7 bags of sugar by 4 PM",
                                         reply_channel="telegram")
     db.commit()
-    assert out["status"] == "confirmed"
-    assert float(out["total_amount"]) == 294.0     # 7*42 one item per order
+    # Intake records the order as RECEIVED: the owner verifies shelf
+    # availability before the buyer hears a total.
+    assert out["status"] == "received"
+    assert float(out["total_amount"]) == 399.0     # 7*57 one item per order
     from app.db.models import Order
     order = db.get(Order, out["order_id"])
     assert order.merchant_id == m.id
-    # UPI link generation is skipped without UPI_PAYEE_VPA in tests
-    assert order.payment is None or order.payment.status.value in ("pending",)
-    assert len(order.line_items) == 1
-    # tests run without UPI_PAYEE_VPA, so no Payment row is created
+    # no payment is minted at intake — the UPI link arrives with verification
     assert order.payment is None
+    assert len(order.line_items) == 1
     # no Telegram token in tests ⇒ the buyer notification reports failure
     # through the result instead of raising — messaging is never fatal.
     assert out["notify_error"] is not None
@@ -317,7 +318,7 @@ def test_telegram_demo_link_endpoint(db, api):
         )
     body = r.json()
     assert r.status_code == 200 and body.get("handled") is True
-    assert body.get("order", {}).get("total_amount") == 84
+    assert body.get("order", {}).get("total_amount") == 114
 
 
 def test_new_pairing_code_digest_roundtrip():
@@ -440,13 +441,13 @@ def test_percent_offer_reduces_the_bill(db):
                                         "send 2 kg sugar", reply_channel="whatsapp",
                                         offer_type="percent", offer_value=10)
     db.commit()
-    # 2*42 = 84 → 10% off → ₹75.60, stored with the offer
-    assert out["total_amount"] == 75.6
-    assert out["discount_amount"] == 8.4
+    # 2*57 = 114 → 10% off → ₹102.60, stored with the offer
+    assert out["total_amount"] == 102.6
+    assert out["discount_amount"] == 11.4
     from app.db.models import Order
     o = db.get(Order, out["order_id"])
     assert o.offer_type == "percent" and o.offer_value == 10.0
-    assert float(o.discount_amount) == 8.4
+    assert float(o.discount_amount) == 11.4
 
 
 def test_cash_offer_and_percent_over_100_clamp_to_the_bill(db):
@@ -455,14 +456,14 @@ def test_cash_offer_and_percent_over_100_clamp_to_the_bill(db):
                                          "send 3 kg sugar", reply_channel="whatsapp",
                                          offer_type="cash", offer_value=50)
     db.commit()
-    # 3*42 = 126 → flat ₹50 off → ₹76
-    assert cash["total_amount"] == 76.0 and cash["discount_amount"] == 50.0
+    # 3*57 = 171 → flat ₹50 off → ₹121
+    assert cash["total_amount"] == 121.0 and cash["discount_amount"] == 50.0
     # A nonsense 150% offer can never push the bill below zero
     crazy = order_intake.parse_and_create(db, m, m.whatsapp_chat_id,
                                           "send 1 kg sugar", reply_channel="whatsapp",
                                           offer_type="percent", offer_value=150)
     db.commit()
-    assert crazy["total_amount"] == 0.0 and crazy["discount_amount"] == 42.0
+    assert crazy["total_amount"] == 0.0 and crazy["discount_amount"] == 57.0
 
 
 def test_offer_zero_or_unknown_type_is_ignored(db):
@@ -471,26 +472,38 @@ def test_offer_zero_or_unknown_type_is_ignored(db):
                                         "send 2 kg sugar", reply_channel="whatsapp",
                                         offer_type="coupon-doomsday", offer_value=99)
     db.commit()
-    assert out["total_amount"] == 84.0 and out["discount_amount"] == 0.0
+    assert out["total_amount"] == 114.0 and out["discount_amount"] == 0.0
     assert out["offer"] is None
 
 
-# ---- Payments: UPI confirms itself; cash waits for the merchant --------------
+# ---- Payments: a UPI link is intent, confirmation is the shop's call ----------
 
-def test_upi_payment_confirms_directly(db):
+def test_upi_payment_link_minted_at_verification_then_confirms(db):
     m = _linked_shop(db)
-    with patch_settings(upi_payee_vpa="shop@upi", upi_payee_name="Test Shop"):
-        out = order_intake.parse_and_create(db, m, m.whatsapp_chat_id,
-                                            "send 2 kg sugar", reply_channel="whatsapp")
+    out = order_intake.parse_and_create(db, m, m.whatsapp_chat_id,
+                                        "send 2 kg sugar", reply_channel="whatsapp")
     db.commit()
-    assert out["upi_link"]  # a payment link was generated for the buyer
     from app.db.models import Order
     order = db.get(Order, out["order_id"])
+    # Intake promises nothing: no link, no payment row, no total to the buyer.
+    assert out["upi_link"] is None
+    assert order.payment is None
+
+    with patch_settings(upi_payee_vpa="shop@upi", upi_payee_name="Test Shop"):
+        fulfillment.verify_order_availability(db, order, [])
+    db.commit()
     assert order.payment is not None
-    # Directly confirmed, no manual step, tagged by method.
-    assert order.payment.status.value == "success"
+    # A link is an intent to pay — the row stays PENDING until money moves.
+    assert order.payment.status.value == "pending"
     assert order.payment.method == "upi"
-    assert float(order.payment.amount) == 84.0
+
+    # Confirmation (PSP webhook / owner's Paid-via-UPI) settles it and books
+    # the sale in the ledger.
+    result = fulfillment.mark_payment_paid(db, order, "upi")
+    assert result["updated"] is True and result["ledger_transaction_group"]
+    db.expire_all()
+    assert order.payment.status.value == "success"
+    assert float(order.payment.amount) == 114.0
 
 
 def test_merchant_confirms_cash_on_a_link_free_order(db, api):
@@ -516,7 +529,7 @@ def test_merchant_confirms_cash_on_a_link_free_order(db, api):
     order = db.get(Order, order.id)
     assert order.payment.status.value == "success"
     assert order.payment.method == "cash"
-    assert float(order.payment.amount) == 84.0
+    assert float(order.payment.amount) == 114.0
     assert order.payment.transaction_ref.startswith("CASH-")
 
     # Already settled — a second tap is idempotent.
@@ -572,7 +585,7 @@ def test_voice_note_becomes_a_live_order(db, api, wa_media, monkeypatch):
     body = r.json()
     assert body["handled"] is True and body["source"] == "voice_note"
     assert body["transcript"] == "send 2 bags of sugar"
-    assert body["order"]["total_amount"] == 84.0  # 2 * 42, same as a typed order
+    assert body["order"]["total_amount"] == 114.0  # 2 * 57, same as a typed order
 
 
 def test_voice_note_without_asr_asks_buyer_to_type(db, api, wa_media, monkeypatch):
@@ -616,7 +629,10 @@ def test_photo_of_list_enters_every_item(db, api, wa_media, monkeypatch):
     items = body["items"]
     assert items[0] == {"item_name": "sugar", "quantity": 5.0, "unit": "kg"}   # unit recovered
     assert items[1] == {"item_name": "detergent bars", "quantity": 2.0, "unit": "units"}
-    assert body["order"]["status"] == "out_of_stock"  # detergent not in the scaffold stock
+    # Every item lands on the order (the owner prunes at verification); the
+    # total covers only what the shelf holds.
+    assert body["order"]["status"] == "received"
+    assert float(body["order"]["total_amount"]) == 285.0  # 5 kg sugar @57 only
     from app.db.models import Order
     order = db.get(Order, body["order"]["order_id"])
     assert order.raw_message == "WhatsApp order photo: 5 kg sugar; 2 units detergent bars"
@@ -649,8 +665,8 @@ def test_reply_includes_order_confirmation_for_in_stock_photo(db, api, wa_media,
     )
     r = api.post("/webhooks/whatsapp", json=META_IMAGE)
     body = r.json()
-    assert body["order"]["status"] == "confirmed"
-    assert float(body["order"]["total_amount"]) == 42.0
+    assert body["order"]["status"] == "received"
+    assert float(body["order"]["total_amount"]) == 57.0
 
 
 # ---- Telegram media orders: voice notes and order-list photos ----------------
@@ -722,7 +738,7 @@ def test_telegram_voice_note_becomes_a_live_order(db, api, tg_media, monkeypatch
     body = r.json()
     assert body["handled"] is True and body["source"] == "voice_note"
     assert body["transcript"] == "send 3 bags of sugar"
-    assert body["order"]["total_amount"] == 126.0  # 3 * 42, same as typed
+    assert body["order"]["total_amount"] == 171.0  # 3 * 57, same as typed
 
 
 def test_telegram_hindi_voice_note_becomes_a_priced_order(db, api, tg_media, monkeypatch):
@@ -734,13 +750,13 @@ def test_telegram_hindi_voice_note_becomes_a_priced_order(db, api, tg_media, mon
     assert r.status_code == 200
     body = r.json()
     assert body["handled"] is True and body["source"] == "voice_note"
-    assert body["order"]["total_amount"] == 126.0  # 3 kg * ₹42 — as if typed
+    assert body["order"]["total_amount"] == 171.0  # 3 kg * ₹57 — as if typed
 
     from sqlalchemy import select
     from app.db.models import Order, OrderLineItem
 
     order = db.execute(select(Order).order_by(Order.created_at.desc())).scalars().first()
-    assert order is not None and order.status.value == "confirmed"
+    assert order is not None and order.status.value == "received"
     li = db.execute(
         select(OrderLineItem).where(OrderLineItem.order_id == order.id)
     ).scalars().first()
@@ -789,7 +805,8 @@ def test_telegram_photo_of_list_enters_every_item(db, api, tg_media, monkeypatch
     items = body["items"]
     assert items[0] == {"item_name": "sugar", "quantity": 5.0, "unit": "kg"}   # unit recovered
     assert items[1] == {"item_name": "detergent bars", "quantity": 2.0, "unit": "units"}
-    assert body["order"]["status"] == "out_of_stock"  # detergent not in the scaffold stock
+    # Every item lands on the order (the owner prunes at verification).
+    assert body["order"]["status"] == "received"
     from app.db.models import Order
     order = db.get(Order, body["order"]["order_id"])
     assert order.raw_message == "Telegram order photo: 5 kg sugar; 2 units detergent bars"
@@ -881,11 +898,17 @@ def test_telegram_help_replies_to_linked_and_stranger_chats(db, api, tg_replies)
 
 def test_telegram_status_summarizes_orders_and_awaiting_payment(db, api, tg_replies):
     m = _tg_shop(db)
-    order_intake.parse_and_create(db, m, "5550001", "send 2 bags of sugar",
-                                  reply_channel="telegram")
-    db.commit()
-    order_intake.parse_and_create(db, m, "5550001", "send 1 kg sugar",
-                                  reply_channel="telegram")
+    orders = []
+    for text in ("send 2 bags of sugar", "send 1 kg sugar"):
+        out = order_intake.parse_and_create(db, m, "5550001", text,
+                                            reply_channel="telegram")
+        db.commit()
+        from app.db.models import Order
+
+        orders.append(db.get(Order, out["order_id"]))
+    # Only verified (confirmed) orders count as awaiting payment.
+    for o in orders:
+        fulfillment.verify_order_availability(db, o, [])
     db.commit()
 
     r = _tg_post(api, {"message": {"text": "/status", "chat": {"id": 5550001}}})
@@ -893,7 +916,7 @@ def test_telegram_status_summarizes_orders_and_awaiting_payment(db, api, tg_repl
     channel, chat, body = tg_replies[-1]   # the /status reply, not the order notices
     assert (channel, chat) == ("telegram", "5550001")
     assert "recent orders" in body
-    assert "₹84.00" in body and "₹42.00" in body
+    assert "₹114.00" in body and "₹57.00" in body
     # Neither order has a payment row (no UPI VPA in tests) ⇒ both owing.
     assert "2 order(s) awaiting payment" in body
 
@@ -948,34 +971,48 @@ def test_bare_start_and_bad_code_reply_instead_of_ordering(db, api, tg_replies):
 # defers Telegram's copy), so its buttons can carry the real order id in
 # callback_data. A tap then settles the payment — cash or UPI — from chat.
 
-def test_telegram_order_message_carries_payment_buttons(db, tg_replies):
+def test_telegram_order_message_carries_verify_buttons(db, tg_replies):
+    """A fresh order splits its messages: the buyer gets a receipt-ack, the
+    OWNER's copy carries the availability-verify buttons (the settle buttons
+    only appear once the order is confirmed)."""
     m = _tg_shop(db)
     out = order_intake.parse_and_create(db, m, "5550001", "send 2 bags of sugar",
                                         reply_channel="telegram")
     db.commit()
-    # Exactly ONE buyer message, with the keyboard attached.
-    assert len(tg_replies) == 1
-    channel, chat, body = tg_replies[-1]
+    assert len(tg_replies) == 2
+    channel, chat, body = tg_replies[0]
     assert (channel, chat) == ("telegram", "5550001")
-    assert body.startswith("Order confirmed! Total: ₹84.00")
-    buttons = tg_replies.markups[-1]["inline_keyboard"][0]
+    assert body.startswith("🧾 Order received!")
+    channel, chat, body = tg_replies[1]
+    assert (channel, chat) == ("telegram", "5550001")
+    assert "New order" in body and "₹114.00" in body
+    buttons = tg_replies.markups[1]["inline_keyboard"][0]
     assert buttons == [
-        {"text": "💵 Cash received", "callback_data": f"cash:{out['order_id']}"},
-        {"text": "✅ Paid via UPI", "callback_data": f"paid:{out['order_id']}"},
+        {"text": "✅ All available", "callback_data": f"avail:{out['order_id']}"},
+        {"text": "❌ None available", "callback_data": f"oos:{out['order_id']}"},
     ]
 
 
-def test_telegram_upi_order_message_sends_link_without_buttons(db, tg_replies):
-    """A UPI-link payment confirms itself, so its message carries the link
-    and no buttons — there is nothing left to confirm."""
+def test_telegram_upi_order_message_sends_link_after_verification(db, tg_replies):
+    """The payment link reaches the buyer only after the owner verifies
+    availability — never on the intake ack."""
+    from app.db.models import Order
+
     m = _tg_shop(db)
-    with patch_settings(upi_payee_vpa="shop@upi", upi_payee_name="Test Shop"):
-        order_intake.parse_and_create(db, m, "5550001", "send 2 bags of sugar",
-                                      reply_channel="telegram")
+    out = order_intake.parse_and_create(db, m, "5550001", "send 2 bags of sugar",
+                                        reply_channel="telegram")
     db.commit()
-    channel, chat, body = tg_replies[-1]
-    assert "Pay here: upi://" in body
-    assert tg_replies.markups[-1] is None
+    assert not any("Pay here" in r[2] for r in tg_replies)
+
+    with patch_settings(upi_payee_vpa="shop@upi", upi_payee_name="Test Shop"):
+        order = db.get(Order, out["order_id"])
+        fulfillment.verify_order_availability(db, order, [])
+    db.commit()
+    # The buyer's confirmation carries the link; the owner's copy (the last
+    # reply) carries the settle buttons instead.
+    buyer_texts = [r[2] for r in tg_replies if "Pay here" in r[2]]
+    assert buyer_texts, [r[2] for r in tg_replies]
+    assert any("upi://" in t and "₹114.00" in t for t in buyer_texts)
 
 
 def test_cash_button_tap_settles_the_payment(db, api, tg_replies, monkeypatch):
@@ -998,7 +1035,7 @@ def test_cash_button_tap_settles_the_payment(db, api, tg_replies, monkeypatch):
     tap = {"update_id": 7, "callback_query": {
         "id": "cb-1", "data": f"cash:{out['order_id']}",
         "message": {"message_id": 42,
-                    "text": "Order confirmed! Total: ₹84.00.",
+                    "text": "Order confirmed! Total: ₹114.00.",
                     "chat": {"id": 5550001}}}}
     r = _tg_post(api, tap)
     body = r.json()
@@ -1007,7 +1044,7 @@ def test_cash_button_tap_settles_the_payment(db, api, tg_replies, monkeypatch):
     db.expire_all()
     order = db.get(Order, out["order_id"])
     assert order.payment.status.value == "success" and order.payment.method == "cash"
-    assert float(order.payment.amount) == 84.0
+    assert float(order.payment.amount) == 114.0
     assert order.payment.transaction_ref.startswith("CASH-")
     # Spinner cleared and the tapped message stamped with the result.
     assert tapped["answer"][0] == "cb-1" and "confirmed" in tapped["answer"][1].lower()
@@ -1081,3 +1118,403 @@ def test_button_tap_cannot_touch_another_shops_order(db, api, tg_replies, monkey
         "message": {"message_id": 6, "text": "x", "chat": {"id": 999000}}}})
     assert r.json()["handled"] is False
     assert answers and answers[0][2] is True
+
+
+# ---- Public storefront ordering: strangers' chats become buyers ---------------
+
+
+def test_public_buyer_order_is_auto_confirmed_and_owner_pinged(db, api, tg_replies):
+    """A stranger messaging the bot places a REAL order: the storefront AI
+    verifies availability against the inventory table itself, the order is
+    confirmed at once (no human tap), the buyer's chat gets the reply and
+    the owner's chat gets the settle buttons.
+    """
+    from sqlalchemy import select
+    from app.db.models import Order
+
+    m = _tg_shop(db)
+    r = _tg_post(api, {"message": {"text": "send 2 bags of sugar",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    order = db.get(Order, body["order"]["order_id"])
+    assert order is not None and order.buyer_chat_id == "999000"
+    assert order.buyer_channel == "telegram"
+    assert order.status.value == "confirmed"          # AI verified, not the owner
+    assert float(order.total_amount) == 114.0          # 2 * ₹57 catalog price
+
+    # Replies split: buyer chat gets the confirmation, owner chat gets the
+    # settle buttons (the verify buttons are never needed — no human step).
+    buyer_texts = [t for (c, ch, t) in tg_replies if ch == "999000"]
+    owner_texts = [(t, mk) for (c, ch, t), mk in zip(tg_replies, tg_replies.markups)
+                   if ch == "5550001"]
+    assert any("Order confirmed! Total: ₹114.00" in t for t in buyer_texts)
+    assert body["order"]["qr_sent"] is False           # no UPI VPA in tests
+    assert owner_texts and "Payment owed" in owner_texts[-1][0]
+    buttons = owner_texts[-1][1]["inline_keyboard"][0]
+    assert buttons == [
+        {"text": "💵 Cash received", "callback_data": f"cash:{order.id}"},
+        {"text": "✅ Paid via UPI", "callback_data": f"paid:{order.id}"},
+    ]
+
+    # Keep the order for the rate-limit test that may run after (independent
+    # DBs per test, so nothing leaks — this commit is just hygiene).
+    db.commit()
+
+
+def test_public_buyer_stock_drops_on_auto_confirm(db, api):
+    """The shelves must not oversell: the goods a public buyer's confirmed
+    order took leave the inventory table immediately (same as a counter
+    sale)."""
+    from sqlalchemy import select
+    from app.db.models import InventoryItem
+
+    m = _tg_shop(db)
+    r = _tg_post(api, {"message": {"text": "send 10 kg sugar",
+                                  "chat": {"id": 999000}}})
+    assert r.json()["handled"] is True
+    row = db.execute(select(InventoryItem).where(
+        InventoryItem.merchant_id == m.id,
+        InventoryItem.item_name == "sugar",
+    )).scalar_one()
+    assert float(row.quantity) == 90.0    # 100 seeded − 10 sold
+
+
+def test_public_buyer_out_of_stock_items_are_pruned_and_repriced(db, api, tg_replies):
+    """Trust-inventory mode mirrors the owner's /missing step: whatever the
+    catalog can't serve is dropped from the order, the total is repriced
+    and the buyer is told exactly what was removed."""
+    from sqlalchemy import select
+    from app.db.models import InventoryItem, Order
+    from app.services import inventory as inventorysvc
+
+    m = _tg_shop(db)
+    inventorysvc.ensure_catalog(db, m)   # the catalog seeds lazily in intake
+    stock = db.execute(select(InventoryItem).where(
+        InventoryItem.merchant_id == m.id,
+        InventoryItem.item_name == "soap",
+    )).scalar_one()
+    stock.quantity = 0.0
+    db.commit()
+
+    r = _tg_post(api, {"message": {"text": "5 soap and 2 kg sugar",
+                                  "chat": {"id": 999000}}})
+    assert r.status_code == 200 and r.json()["handled"] is True
+    body = r.json()["order"]
+    from app.db.models import Order as _O
+    order = db.get(_O, body["order_id"])
+    assert order.status.value == "confirmed"
+    assert float(order.total_amount) == 114.0          # soap (₹150) removed
+    names = {li.item_name for li in order.line_items}
+    assert names == {"sugar"}                          # soap line deleted
+    buyer_texts = [t for (c, ch, t) in tg_replies if ch == "999000"]
+    assert any("Not available & removed: soap" in t for t in buyer_texts)
+
+
+def test_public_buyer_chatter_is_not_a_junk_order(db, api, tg_replies):
+    """"hi" from a stranger must create no order row — the bot teaches them
+    how to order instead."""
+    from sqlalchemy import select
+    from app.db.models import Order
+
+    m = _tg_shop(db)
+    r = _tg_post(api, {"message": {"text": "hello there!",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert body["order"]["status"] == "not_an_order"
+    assert db.execute(select(Order).where(Order.merchant_id == m.id)).scalars().all() == []
+    assert any("couldn't find any items" in t for (c, ch, t) in tg_replies if ch == "999000")
+
+
+def test_public_buyer_is_rate_limited(db, api, monkeypatch):
+    """Spam guardrail: beyond PUBLIC_ORDER_RATE_LIMIT_PER_HOUR orders in the
+    last hour, one buyer chat gets the polite bounce instead of infinite
+    orders against the shop."""
+    m = _tg_shop(db)
+    with patch_settings(public_order_rate_limit_per_hour=1):
+        first = _tg_post(api, {"message": {"text": "send 1 soap",
+                                          "chat": {"id": 999000}}})
+        assert first.json()["handled"] is True
+        assert first.json()["order"]["order_id"] is not None
+        second = _tg_post(api, {"message": {"text": "send 1 kg sugar",
+                                           "chat": {"id": 999000}}})
+    body = second.json()
+    assert body["handled"] is True
+    assert body["order"]["rate_limited"] is True
+    assert body["order"]["order_id"] is None
+
+
+def test_storefront_off_button_keeps_human_verification(db, api, tg_replies, monkeypatch):
+    """AUTO_CONFIRM_PUBLIC_ORDERS=0: stranger orders are still taken, but
+    back into the owner-verify flow (RECEIVED + verify buttons, no auto QR)."""
+    from app.db.models import Order
+
+    m = _tg_shop(db)
+    with patch_settings(auto_confirm_public_orders=False):
+        r = _tg_post(api, {"message": {"text": "send 2 bags of sugar",
+                                       "chat": {"id": 999000}}})
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    order = db.get(Order, body["order"]["order_id"])
+    assert order.status.value == "received"
+    # Receipt-ack to the buyer, verify buttons to the owner.
+    assert any("Order received!" in t for (c, ch, t) in tg_replies if ch == "999000")
+    owner_markup = [mk for (c, ch, t), mk in zip(tg_replies, tg_replies.markups)
+                    if ch == "5550001"][-1]
+    assert {b["text"] for b in owner_markup["inline_keyboard"][0]} == {
+        "✅ All available", "❌ None available"}
+
+
+def test_public_whatsapp_buyer_orders_without_linking(db, tg_replies):
+    """Same storefront on WhatsApp: a stranger's number (the shop's linked
+    chat is 9870001111) can order straight through the Cloud API webhook —
+    no UPI QR image here, but the confirmation text carries the pay link."""
+    from sqlalchemy import select
+    from app.db.models import Order
+
+    m = make_shop(db, wa="9870001111", wa_chat="9870001111")
+    stranger = {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "STORE_ID", "changes": [{
+            "value": {
+                "messaging_product": "whatsapp",
+                "messages": [{
+                    "from": "919876543210", "id": "wamid.CX", "type": "text",
+                    "text": {"body": "Send 2 bags of sugar"},
+                }],
+                "contacts": [],
+            }, "field": "messages"}]}],
+    }
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import webhooks
+    from app.db.session import get_db
+
+    probe = FastAPI()
+    probe.include_router(webhooks.router)
+
+    def override_get_db():
+        try:
+            yield db
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+    probe.dependency_overrides[get_db] = override_get_db
+    client = TestClient(probe)
+
+    r = client.post("/webhooks/whatsapp", json=stranger)
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert body["source"] == "storefront_whatsapp"
+    order = db.get(Order, body["order"]["order_id"])
+    assert order is not None and order.buyer_chat_id == "919876543210"
+    assert order.buyer_channel == "whatsapp"
+    assert order.status.value == "confirmed" and float(order.total_amount) == 114.0
+    buyer_texts = [t for (c, ch, t) in tg_replies if ch == "919876543210"]
+    assert any("Order confirmed! Total: ₹114.00" in t for t in buyer_texts)
+    assert db.execute(select(Order).where(Order.merchant_id == m.id)).scalars().all() != []
+
+
+# ---- Storefront shop memory: choose once, order forever -----------------------
+
+
+def _two_shops(db):
+    """Two live telegram shops on the shared bot (the multi-shop storefront
+    the chooser exists for)."""
+    a = make_shop(db, wa="9870009001", tg="5550001")
+    a.business_name = "Sharma Kirana Store"
+    b = make_shop(db, wa="9870009002", tg="5660001")
+    b.business_name = "Shukla Gift Store"
+    db.commit()
+    return a, b
+
+
+def _buyer_orders(db, merchant):
+    from sqlalchemy import select
+
+    from app.db.models import Order
+
+    return db.execute(select(Order).where(Order.merchant_id == merchant.id)) \
+        .scalars().all()
+
+
+def test_order_named_shop_then_bare_orders_keep_the_choice(db, api, tg_replies):
+    """THE customer flow from the field: buyer names a shop once; every
+    later order WITHOUT the shop's name still goes to that shop — no more
+    chooser on every message."""
+    sharma, shukla = _two_shops(db)
+
+    r = _tg_post(api, {"message": {"text": "2 kg sugar from shukla gift store",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert body["handled"] is True and body["order"]["order_id"] is not None
+    assert _buyer_orders(db, shukla) and not _buyer_orders(db, sharma)
+
+    # The bare follow-up order: remembered choice, no chooser again.
+    r = _tg_post(api, {"message": {"text": "send 1 kg sugar",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert body["handled"] is True and body["order"]["status"] == "confirmed"
+    assert len(_buyer_orders(db, shukla)) == 2
+    assert len(_buyer_orders(db, sharma)) == 0
+    assert not any("This bot carries more than one shop" in t
+                   for (c, ch, t) in tg_replies if ch == "999000")
+
+
+def test_shop_name_only_message_selects_shop_and_welcomes(db, api, tg_replies):
+    """Typing just the shop's name (the screenshot's flow) is the SELECTION,
+    staying no order row and no error — then the bare order routes there."""
+    sharma, shukla = _two_shops(db)
+
+    r = _tg_post(api, {"message": {"text": "shukla gift store",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert body["order"]["status"] == "shop_selected"
+    assert body["order"]["order_id"] is None
+    welcome = [t for (c, ch, t) in tg_replies if ch == "999000"][-1]
+    assert "Welcome to Shukla Gift Store" in welcome
+    assert _buyer_orders(db, shukla) == []           # nothing ordered yet
+
+    r = _tg_post(api, {"message": {"text": "2 kg sugar and 2 soap",
+                                  "chat": {"id": 999000}}})
+    body = r.json()
+    assert body["order"]["order_id"] is not None
+    assert len(_buyer_orders(db, shukla)) == 1
+    total = _buyer_orders(db, shukla)[0].total_amount
+    assert float(total) == 174.0                      # 2*57 + 2*30
+
+
+def test_naming_a_different_shop_switches_the_choice(db, api, tg_replies):
+    sharma, shukla = _two_shops(db)
+    r = _tg_post(api, {"message": {"text": "send 1 kg sugar",
+                                  "chat": {"id": 999000}}})
+    assert r.json()["handled"] is True                     # chooser sent
+    r = _tg_post(api, {"message": {"text": "sharma kirana store",
+                                  "chat": {"id": 999000}}})
+    assert r.json()["order"]["status"] == "shop_selected"
+    r = _tg_post(api, {"message": {"text": "send 2 soap",
+                                  "chat": {"id": 999000}}})
+    assert r.json()["order"]["order_id"] is not None
+    assert len(_buyer_orders(db, sharma)) == 1
+    assert len(_buyer_orders(db, shukla)) == 0
+
+
+def test_telegram_verify_button_tap_confirms_or_refuses_the_order(db, api, tg_replies, monkeypatch):
+    """Tapping the owner's verify cards ("all available" / "none available") runs
+    the same availability check the dashboard /availability endpoint uses, and
+    answers + stamps the tapped message so the spinner clears and the buttons
+    disappear."""
+
+    from app.db.models import Order
+    from app.integrations import telegram as tgmod
+
+    m = _tg_shop(db)
+    out = order_intake.parse_and_create(db, m, "5550001", "send 2 bags of sugar",
+                                        reply_channel="telegram")
+    db.commit()
+    order = db.get(Order, out["order_id"])
+    assert order.status.value == "received"
+
+    tapped = {}
+    monkeypatch.setattr(tgmod, "answer_callback_query",
+                        lambda cb_id, text="", show_alert=False: tapped.setdefault("tap", (cb_id, text, show_alert)))
+    monkeypatch.setattr(tgmod, "edit_message_text",
+                        lambda chat_id, mid, text:
+                            tapped.setdefault("edit", (chat_id, mid, text)))
+
+    # --- "all available" -> order confirmed, buyer gets total, owner gets settle cards ---
+    payload = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb-avail",
+            "data": f"avail:{out['order_id']}",
+            "message": {
+                "message_id": 7,
+                "text": "New order ...",
+                "chat": {"id": 5550001},
+            },
+        },
+    }
+    r = _tg_post(api, payload)
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert body["availability"]["updated"] is True
+    assert body["availability"]["status"] == "confirmed"
+    assert body["availability"]["total"] == 114.0
+    db.expire_all()
+    assert db.get(Order, out["order_id"]).status.value == "confirmed"
+    assert tapped["tap"][0] == "cb-avail" and "All available" in tapped["tap"][1]
+    assert tapped["edit"][0:2] == ("5550001", 7)
+    assert "All available" in tapped["edit"][2]
+
+    # The buyer got the confirmation (from verify_order_availability).
+    buyer_texts = [r[2] for r in tg_replies if "Order confirmed! Total" in r[2]]
+    assert buyer_texts, [r[2] for r in tg_replies]
+    assert any("114.00" in t for t in buyer_texts)
+
+    # The owner got settle buttons on a fresh message.
+    owner = [(r[2], mk) for r, mk in zip(tg_replies, tg_replies.markups)
+             if r[1] == "5550001" and "Payment owed" in r[2]]
+    assert owner, "owner should get settle buttons after verifying"
+    buttons = owner[-1][1]["inline_keyboard"][0]
+    assert buttons == [
+        {"text": "\U0001f4b5 Cash received", "callback_data": f"cash:{out['order_id']}"},
+        {"text": "\u2705 Paid via UPI", "callback_data": f"paid:{out['order_id']}"},
+    ]
+
+    # --- "none available" -> order refused, buyer told, no QR ---
+    out2 = order_intake.parse_and_create(db, m, "5550001", "send 1 kg rice",
+                                         reply_channel="telegram")
+    db.commit()
+    order2 = db.get(Order, out2["order_id"])
+    assert order2.status.value == "received"
+    tapped.clear()
+    payload2 = {
+        "update_id": 2,
+        "callback_query": {
+            "id": "cb-oos",
+            "data": f"oos:{out2['order_id']}",
+            "message": {
+                "message_id": 9,
+                "text": "New order ...",
+                "chat": {"id": 5550001},
+            },
+        },
+    }
+    r = _tg_post(api, payload2)
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert body["availability"]["updated"] is True
+    assert body["availability"]["status"] == "out_of_stock"
+    assert body["availability"]["missing"] == ["rice"]  # catalog has no rice
+    db.expire_all()
+    assert db.get(Order, out2["order_id"]).status.value == "out_of_stock"
+    assert tapped["tap"][0] == "cb-oos" and "unavailable" in tapped["tap"][1].lower()
+
+    buyer_texts2 = [r[2] for r in tg_replies if "currently unavailable" in r[2]]
+    assert buyer_texts2, "buyer should be told the item is unavailable"
+    assert any("rice" in t for t in buyer_texts2)
+
+    # Tapping the verify card on an already-verified order is rejected.
+    tapped.clear()
+    payload3 = {
+        "update_id": 3,
+        "callback_query": {
+            "id": "cb-redo",
+            "data": f"avail:{out['order_id']}",
+            "message": {
+                "message_id": 7,
+                "text": "...",
+                "chat": {"id": 5550001},
+            },
+        },
+    }
+    r = _tg_post(api, payload3)
+    body = r.json()
+    assert r.status_code == 200 and body["handled"] is True
+    assert "already" in tapped["tap"][1].lower()

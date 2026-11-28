@@ -5,7 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
-    Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, Numeric, String, Text
+    Boolean, DateTime, Enum, Float, ForeignKey, Index, Integer, Numeric, String,
+    Text, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -17,6 +18,7 @@ __all__ = [
     "Base", "Merchant", "LedgerEntry", "Order", "OrderLineItem", "Payment",
     "LoanApplicationRecord", "ApprovalRequest", "AuditEvent",
     "LoginChallenge", "AuthSession", "MerchantChannelPreference",
+    "InventoryItem", "StorefrontSelection",
     "EntryType", "OrderStatus", "PaymentStatus", "ApprovalStatus",
 ]
 
@@ -52,6 +54,7 @@ class Merchant(Base):
     # Telegram chat id of the merchant once they message /start <code> to the
     # bot — used to deliver login OTPs. None = Telegram 2FA not linked yet.
     telegram_chat_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    telegram_link_code: Mapped[str | None] = mapped_column(String, nullable=True)
     # WhatsApp chat of the SHOP itself, linked on first contact: whenever an
     # inbound WhatsApp message arrives from the shop's own registered number,
     # the webhook stores it here — after that, buyer messages sent to that
@@ -125,6 +128,12 @@ class Order(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.id"))
     buyer_whatsapp_number: Mapped[str] = mapped_column(String)
+    # Where the ORDER came from and where buyer-facing replies (payment QR,
+    # ready notice, bill) go. For channel-linked shops these mirror the shop
+    # chat; public buyers carry their own Telegram chat id / WhatsApp
+    # number — the shop's linked chat is only its owner identity.
+    buyer_channel: Mapped[str | None] = mapped_column(String, nullable=True)  # "telegram" | "whatsapp"
+    buyer_chat_id: Mapped[str | None] = mapped_column(String, nullable=True)
     raw_message: Mapped[str] = mapped_column(Text)
     status: Mapped[OrderStatus] = mapped_column(Enum(OrderStatus), default=OrderStatus.RECEIVED)
     requested_by: Mapped[str | None] = mapped_column(String, nullable=True)  # "by 4 PM" etc, as text
@@ -169,11 +178,36 @@ class Payment(Base):
     # "cash" = the merchant tapped "confirm cash" on the dashboard. Null =
     # unconfirmed/no payment row.
     method: Mapped[str | None] = mapped_column(String, nullable=True)  # "cash" | "upi"
+    # The ledger transaction_group of the Sales row booked when this payment
+    # was confirmed. Null = not posted yet (also: payments confirmed before
+    # the ledger link existed) — the next confirm/replay posts it.
+    ledger_transaction_group: Mapped[str | None] = mapped_column(String, nullable=True)
     reminder_escalation_level: Mapped[int] = mapped_column(Integer, default=0)
     last_reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     order: Mapped["Order"] = relationship(back_populates="payment")
+
+
+class InventoryItem(Base):
+    """One catalog item's stock and price for one shop. Order intake checks
+    quantity against this table; handing items over (offline/walk-in orders)
+    decrements it. item_name is the canonical lowercase key the parser's
+    aliases resolve to ("chini" -> "sugar")."""
+    __tablename__ = "inventory_items"
+    __table_args__ = (UniqueConstraint("merchant_id", "item_name",
+                                       name="uq_inventory_merchant_item"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.id"), index=True)
+    item_name: Mapped[str] = mapped_column(String)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    unit_price: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    merchant: Mapped["Merchant"] = relationship()
 
 
 class LoanApplicationRecord(Base):
@@ -218,6 +252,27 @@ class MerchantChannelPreference(Base):
     role: Mapped[str] = mapped_column(String)   # "otp" | "orders"
     channel: Mapped[str] = mapped_column(String)  # "telegram" | "whatsapp"
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class StorefrontSelection(Base):
+    """A public buyer chat's most recently chosen storefront shop. When the
+    bot carries several shops, the buyer picks once ("order from shukla gift
+    store") and every later order from that chat routes there — no need to
+    name the shop in every message. One row per chat: naming a different
+    shop OVERWRITES the choice.
+    """
+    __tablename__ = "storefront_selections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    buyer_channel: Mapped[str] = mapped_column(String)   # "telegram" | "whatsapp"
+    buyer_chat_id: Mapped[str] = mapped_column(String, index=True)
+    merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.id"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                  onupdate=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("buyer_channel", "buyer_chat_id",
+                         name="uq_storefront_selection_chat"),
+    )
 
 
 class AuditEvent(Base):

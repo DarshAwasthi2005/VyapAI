@@ -18,14 +18,14 @@ def upgrade() -> None:
     # Float -> Numeric(14,2) for every money column. SQLite/Postgres-safe
     # surface types; on Postgres this is a real type change with implicit
     # value cast (values are already 2dp by convention).
-    op.alter_column("ledger_entries", "amount",
-                    type_=sa.Numeric(14, 2), existing_nullable=False)
-    op.alter_column("orders", "total_amount",
-                    type_=sa.Numeric(14, 2), existing_nullable=False)
-    op.alter_column("payments", "amount",
-                    type_=sa.Numeric(14, 2), existing_nullable=False)
-    op.alter_column("loan_applications", "requested_amount",
-                    type_=sa.Numeric(14, 2), existing_nullable=False)
+    with op.batch_alter_table("ledger_entries") as batch_op:
+        batch_op.alter_column("amount", type_=sa.Numeric(14, 2), existing_nullable=False)
+    with op.batch_alter_table("orders") as batch_op:
+        batch_op.alter_column("total_amount", type_=sa.Numeric(14, 2), existing_nullable=False)
+    with op.batch_alter_table("payments") as batch_op:
+        batch_op.alter_column("amount", type_=sa.Numeric(14, 2), existing_nullable=False)
+    with op.batch_alter_table("loan_applications") as batch_op:
+        batch_op.alter_column("requested_amount", type_=sa.Numeric(14, 2), existing_nullable=False)
 
     op.create_table(
         "audit_events",
@@ -47,11 +47,11 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_audit_events_created_at", table_name="audit_events")
     op.drop_table("audit_events")
-    op.alter_column("loan_applications", "requested_amount",
-                    type_=sa.Float, existing_nullable=False)
-    op.alter_column("payments", "amount",
-                    type_=sa.Float, existing_nullable=False)
-    op.alter_column("orders", "total_amount",
-                    type_=sa.Float, existing_nullable=False)
-    op.alter_column("ledger_entries", "amount",
-                    type_=sa.Float, existing_nullable=False)
+    with op.batch_alter_table("loan_applications") as batch_op:
+        batch_op.alter_column("requested_amount", type_=sa.Float, existing_nullable=False)
+    with op.batch_alter_table("payments") as batch_op:
+        batch_op.alter_column("amount", type_=sa.Float, existing_nullable=False)
+    with op.batch_alter_table("orders") as batch_op:
+        batch_op.alter_column("total_amount", type_=sa.Float, existing_nullable=False)
+    with op.batch_alter_table("ledger_entries") as batch_op:
+        batch_op.alter_column("amount", type_=sa.Float, existing_nullable=False)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import routes_auth, routes_b2b, routes_b2c, routes_channels, webhooks
@@ -62,6 +62,11 @@ def health():
     return {"status": "ok", "env": settings.app_env}
 
 
+@app.get("/")
+def root():
+    return RedirectResponse(url="/app/")
+
+
 app.include_router(routes_auth.router)
 app.include_router(routes_b2b.router)
 app.include_router(routes_b2c.router)
@@ -73,4 +78,4 @@ app.include_router(webhooks.router)
 # in registration order).
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 if _frontend_dir.is_dir():
-    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+    app.mount("/app", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")

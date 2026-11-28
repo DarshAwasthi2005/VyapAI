@@ -59,6 +59,51 @@ def test_send_text_message_posts_to_bot_api(monkeypatch):
     assert captured["json"] == {"chat_id": 42, "text": "Namaste"}
 
 
+def test_send_photo_uploads_the_qr_png_with_caption(monkeypatch):
+    captured = {}
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        captured["url"] = url
+        captured["data"] = data
+        captured["files"] = files
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with patch_settings(telegram_bot_token="T0KEN"):
+        telegram.send_photo(42, b"\x89PNG-PIXELS", caption="Scan to pay ₹84")
+
+    assert captured["url"] == "https://api.telegram.org/botT0KEN/sendPhoto"
+    assert captured["data"]["chat_id"] == "42"
+    assert captured["data"]["caption"] == "Scan to pay ₹84"
+    (filename, payload, mime) = captured["files"]["photo"]
+    assert filename == "payment-qr.png" and payload == b"\x89PNG-PIXELS"
+    assert mime == "image/png"
+
+
+def test_send_photo_without_token_is_not_configured(monkeypatch):
+    def fail(*a, **k):
+        raise AssertionError("no HTTP call may happen without a token")
+
+    monkeypatch.setattr(httpx, "post", fail)
+    with patch_settings(telegram_bot_token=""):
+        with pytest.raises(NotConfiguredError):
+            telegram.send_photo(42, b"PNG", caption="x")
+
+
+def test_send_photo_long_caption_is_truncated_to_telegram_limit(monkeypatch):
+    captured = {}
+
+    def fake_post(url, data=None, files=None, timeout=None):
+        captured["data"] = data
+        return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with patch_settings(telegram_bot_token="T0KEN"):
+        telegram.send_photo(42, b"PNG", caption="y" * 2000)
+
+    assert len(captured["data"]["caption"]) == 1024
+
+
 def test_send_text_message_api_error_is_upstream(monkeypatch):
     monkeypatch.setattr(
         httpx, "post", lambda *a, **kw: _FakeResponse({"ok": False}, status=500)

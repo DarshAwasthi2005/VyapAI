@@ -84,7 +84,7 @@ function showFormError(el, msg) {
 
 function chip(status) {
   const s = (status || "—").replace(/_/g, " ");
-  const cls = ["paid", "confirmed", "pending", "failed", "out_of_stock", "rejected"].includes(status)
+  const cls = ["paid", "confirmed", "pending", "failed", "out_of_stock", "received", "rejected"].includes(status)
     ? status : "";
   return `<span class="chip ${cls}">${s}</span>`;
 }
@@ -247,6 +247,7 @@ async function verifyLogin(challengeId, code, errEl) {
 }
 
 function showLogin() {
+  stopLive(); // nothing on the login screen to keep fresh
   showScreen(SCREEN_LOGIN);
   $("login-step-number").classList.remove("hidden");
   $("login-step-verify").classList.add("hidden");
@@ -448,18 +449,101 @@ async function enterDashboard(merchant) {
   $("wa-link-btn").textContent = "Simulate first-contact link";
   await refreshAll();
   await renderChannels();
+  startLive(); // keep orders, books and approvals live from here on
 }
 
-async function refreshAll() {
+// ---------- live dashboard ----------
+// The dashboard used to be a one-time snapshot: a new order, a Telegram entry
+// or a payment confirmation only appeared after F5. It now re-fetches every
+// few seconds and repaints only when something actually changed, so the tables
+// never flicker and a brand-new order also pops a toast.
+const LIVE_EVERY_MS = 3000;
+let liveTimer = null;
+let liveBusy = false;
+let livePainted = "";       // JSON of the data currently on screen
+let liveOrderIds = null;     // ids of the orders painted last time
+let pointerHeld = false;     // don't swap buttons out from under a click
+
+document.addEventListener("pointerdown", () => { pointerHeld = true; });
+document.addEventListener("pointerup", () => { pointerHeld = false; });
+document.addEventListener("pointercancel", () => { pointerHeld = false; });
+
+function dashIsOpen() {
+  return !!SCREEN_DASH && !SCREEN_DASH.classList.contains("hidden");
+}
+
+async function fetchDashboard() {
   const [ledger, orders, approvals] = await Promise.all([
     api(`/b2b/merchants/${MERCHANT_ID}/ledger`),
     api(`/b2b/merchants/${MERCHANT_ID}/orders`),
     api(`/b2b/merchants/${MERCHANT_ID}/approvals`),
   ]);
-  renderStats(ledger, orders);
-  renderLedger(ledger);
-  renderOrders(orders);
-  renderApprovals(approvals);
+  return { ledger, orders, approvals };
+}
+
+function paintDashboard(data) {
+  renderStats(data.ledger, data.orders);
+  renderLedger(data.ledger);
+  renderOrders(data.orders);
+  renderApprovals(data.approvals);
+  livePainted = JSON.stringify(data);
+  liveOrderIds = new Set(data.orders.map((o) => o.id));
+}
+
+function flashStats() {
+  document.querySelectorAll(".stat").forEach((el) => {
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 700);
+  });
+}
+
+function setLiveState(on) {
+  const pill = $("live-pill");
+  if (pill) pill.classList.toggle("off", !on);
+}
+
+async function liveTick() {
+  if (liveBusy || pointerHeld || !MERCHANT_ID || !dashIsOpen() || document.hidden) return;
+  liveBusy = true;
+  try {
+    const data = await fetchDashboard();
+    setLiveState(true);
+    const snapshot = JSON.stringify(data);
+    if (snapshot === livePainted) return; // nothing new — leave the DOM alone
+    const known = liveOrderIds;
+    const freshOrders = known ? data.orders.filter((o) => !known.has(o.id)) : [];
+    paintDashboard(data);
+    flashStats();
+    if (freshOrders.length) {
+      const o = freshOrders[0];
+      const who = o.buyer && o.buyer !== "walk-in" ? ` — ${o.buyer}` : "";
+      toast(`🔔 ${t("toast_new_order")}${who} · ${fmtInr(o.total_amount)}`, "ok");
+    }
+  } catch {
+    setLiveState(false); // server asleep or session dropped — next tick retries
+  } finally {
+    liveBusy = false;
+  }
+}
+
+function startLive() {
+  if (liveTimer) return;
+  setLiveState(true);
+  liveTimer = setInterval(liveTick, LIVE_EVERY_MS);
+}
+
+function stopLive() {
+  if (liveTimer) clearInterval(liveTimer);
+  liveTimer = null;
+}
+
+// Coming back to the tab catches up immediately instead of waiting a tick.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) liveTick(); });
+window.addEventListener("focus", () => liveTick());
+
+// Full repaint, used after an action in this tab.
+async function refreshAll() {
+  paintDashboard(await fetchDashboard());
 }
 
 function renderStats(ledger, orders) {
@@ -501,6 +585,30 @@ function offerCell(o) {
 
 const fmtQty = (n) => (Number(n) % 1 === 0 ? String(Math.trunc(Number(n))) : String(Number(n)));
 
+// One place decides which buttons an order row offers: an order the owner has
+// not accepted yet gets the availability step, and unsettled orders get the two
+// ways money actually arrives (cash in hand / UPI received).
+function orderActions(o) {
+  const unpaid = o.payment_status !== "success";
+  const accepted = o.status === "confirmed" || o.status === "ready";
+  const acts = [];
+  if (o.status === "received") {
+    acts.push(`<button class="btn tiny approve" data-accept="${o.id}">${t("btn_accept")}</button>`);
+    acts.push(`<button class="btn tiny reject" data-reject="${o.id}">${t("btn_reject")}</button>`);
+  }
+  if (accepted && unpaid) {
+    acts.push(`<button class="btn tiny cash" data-cash="${o.id}">${t("btn_cash")}</button>`);
+    acts.push(`<button class="btn tiny approve" data-paid="${o.id}">${t("pay_upi")}</button>`);
+  }
+  if (o.status === "confirmed") {
+    acts.push(`<button class="btn tiny" data-ready="${o.id}">${t("btn_ready")}</button>`);
+  }
+  if (o.upi_deep_link && unpaid) {
+    acts.push(`<a class="upi-link" href="${esc(o.upi_deep_link)}">${t("upi_link")}</a>`);
+  }
+  return acts.join("");
+}
+
 function renderOrders(orders) {
   const tbody = $("orders-table").querySelector("tbody");
   tbody.innerHTML = orders
@@ -512,33 +620,86 @@ function renderOrders(orders) {
       <td><strong>${fmtInr(o.total_amount)}</strong></td>
       <td>${chip(o.status)}</td>
       <td>${o.payment_status ? chip(o.payment_status) + (o.payment_method ? ` <span class="muted" style="font-size:11px">${o.payment_method}</span>` : "") : '<span class="muted">—</span>'}</td>
-      <td>${o.status === "confirmed" && o.payment_status !== "success"
-        ? `<button class="btn tiny cash" data-cash="${o.id}">${t("btn_cash")}</button>`
-        : ""}${o.upi_deep_link && o.payment_status !== "success"
-        ? `<a class="upi-link" href="${esc(o.upi_deep_link)}">${t("upi_link")}</a>`
-        : ""}</td>
+      <td>${orderActions(o)}</td>
     </tr>`)
     .join("") || `<tr><td colspan="8" class="muted">${t("empty_orders")}</td></tr>`;
 
+  tbody.querySelectorAll("button[data-accept]").forEach((b) =>
+    b.addEventListener("click", () => acceptOrder(b.dataset.accept))
+  );
+  tbody.querySelectorAll("button[data-reject]").forEach((b) =>
+    b.addEventListener("click", () => rejectOrder(b.dataset.reject))
+  );
   tbody.querySelectorAll("button[data-cash]").forEach((b) =>
-    b.addEventListener("click", () => confirmCash(b.dataset.cash))
+    b.addEventListener("click", () => confirmPayment(b.dataset.cash, "cash"))
+  );
+  tbody.querySelectorAll("button[data-paid]").forEach((b) =>
+    b.addEventListener("click", () => confirmPayment(b.dataset.paid, "upi"))
+  );
+  tbody.querySelectorAll("button[data-ready]").forEach((b) =>
+    b.addEventListener("click", () => confirmReady(b.dataset.ready))
   );
 }
 
-async function confirmCash(orderId) {
-  // Money in hand: the merchant confirms the cash on the spot (UPI payments
-  // confirm themselves the moment their link is generated).
-  await api("/webhooks/payments/cash", {
-    method: "POST",
-    body: JSON.stringify({ order_id: orderId }),
-  });
-  toast(t("toast_cash"), "ok");
+async function confirmReady(orderId) {
+  // Packing step: the buyer is told on their chat that the order is ready.
+  try {
+    await api(`/b2b/merchants/${MERCHANT_ID}/orders/${orderId}/ready`, { method: "POST", body: "{}" });
+    toast("📦 " + (t("btn_ready") || "Order ready"), "ok");
+  } catch (ex) {
+    toast("Ready failed: " + ex.message, "warn");
+  }
   await refreshAll();
-  // Flash the updated stat cards.
-  document.querySelectorAll(".stat").forEach((el) => {
-    el.classList.add("flash");
-    setTimeout(() => el.classList.remove("flash"), 700);
-  });
+}
+
+async function confirmPayment(orderId, method = "cash") {
+  // Money in hand: the merchant confirms money RECEIVED (UPI landed or cash
+  // taken) — until this the order shows PENDING and the sale is NOT in the
+  // ledger; settling writes the Sales row and sends the bill.
+  try {
+    await api("/webhooks/payments/cash", {
+      method: "POST",
+      body: JSON.stringify({ order_id: orderId, method }),
+    });
+    toast(method === "upi" ? t("toast_paid").replace("{m}", "UPI") : t("toast_cash"), "ok");
+  } catch (ex) {
+    toast("Payment failed: " + ex.message, "warn");
+  }
+  await refreshAll();
+  flashStats();
+}
+
+async function acceptOrder(orderId) {
+  // The owner's availability step, which the dashboard never had: accept the
+  // order (nothing missing), the buyer gets the total, and the settle buttons
+  // replace this one on the next live tick.
+  try {
+    const r = await api(`/b2b/merchants/${MERCHANT_ID}/orders/${orderId}/availability`, {
+      method: "POST",
+      body: JSON.stringify({ items_missing: [] }),
+    });
+    toast(r.status === "confirmed" ? t("toast_accepted") : t("toast_flagged") + r.status,
+          r.status === "confirmed" ? "ok" : "warn");
+  } catch (ex) {
+    toast("Accept failed: " + ex.message, "warn");
+  }
+  await refreshAll();
+}
+
+async function rejectOrder(orderId) {
+  // Same availability step, "every item unavailable": the order becomes
+  // OUT_OF_STOCK, the buyer is told, and no payment link is ever minted —
+  // nothing reaches the ledger.
+  try {
+    const r = await api(`/b2b/merchants/${MERCHANT_ID}/orders/${orderId}/availability`, {
+      method: "POST",
+      body: JSON.stringify({ items_missing: ["all"] }),
+    });
+    toast(t("toast_rejected_order"), r.status === "out_of_stock" ? "warn" : "ok");
+  } catch (ex) {
+    toast("Reject failed: " + ex.message, "warn");
+  }
+  await refreshAll();
 }
 
 function renderApprovals(approvals) {
@@ -600,19 +761,35 @@ $("entry-form").addEventListener("submit", async (e) => {
   }
 });
 
+// Offline (walk-in) orders: paid at the counter, items handed over at once.
+// Toggling it reveals the pay-now choice and relaxes the buyer-number
+// requirement — a walk-in customer may be gone before you type anything.
+$("order-offline").addEventListener("change", () => {
+  const offline = $("order-offline").checked;
+  $("order-pay-row").classList.toggle("hidden", !offline);
+  $("order-buyer").required = !offline;
+  $("order-buyer").placeholder = offline
+    ? "walk-in customer (optional)"
+    : "e.g. 9876543210";
+});
+
 $("order-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const fb = $("order-feedback");
   const offerType = $("offer-type").value;
   const offerRaw = parseFloat($("offer-value").value);
-  const offer = ($.trim($("offer-value").value) && offerRaw > 0)
+  const offer = ($("offer-value").value.trim() && offerRaw > 0)
     ? { offer_type: offerType, offer_value: offerRaw } : {};
+  const offline = $("order-offline").checked;
+  const payMethod = offline ? ($("order-pay").value || null) : null;
   try {
     const out = await api(`/b2c/merchants/${MERCHANT_ID}/orders`, {
       method: "POST",
       body: JSON.stringify({
-        from_number: $("order-buyer").value.trim(),
+        from_number: $("order-buyer").value.trim() || "walk-in",
         message_text: $("order-text").value.trim(),
+        offline,
+        payment_method: payMethod,
         ...offer,
       }),
     });
@@ -621,6 +798,12 @@ $("order-form").addEventListener("submit", async (e) => {
       out.total_amount ? t("toast_total").replace("{x}", fmtInr(out.total_amount)) : "",
       out.discount_amount ? t("toast_offer").replace("{x}", fmtInr(out.discount_amount)).replace("{t}", offer.offer_type) : "",
       out.upi_link ? t("toast_upisent") : "",
+      (out.unavailable || []).length
+        ? t("toast_unavailable").replace("{x}", out.unavailable.join(", "))
+        : "",
+      out.payment_status === "success"
+        ? t("toast_paid").replace("{m}", out.payment_method)
+        : "",
     ].filter(Boolean);
     setFeedback(fb, lines.join(" · "), out.status === "confirmed");
     toast(out.status === "confirmed" ? t("toast_order_confirmed") : t("toast_flagged") + out.status,

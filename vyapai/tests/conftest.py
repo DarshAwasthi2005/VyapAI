@@ -8,6 +8,10 @@ import os
 # throwaway SQLite instead. (Explicitly-set values are never overridden.)
 os.environ.setdefault("DATABASE_URL", "sqlite:///./vyapai-test.db")
 os.environ.setdefault("APP_ENV", "development")
+# Ensure test isolation: tests run against clean default settings without
+# picking up developer-specific live credentials or payment VPAs from .env.
+os.environ["UPI_PAYEE_VPA"] = ""
+os.environ["TELEGRAM_BOT_TOKEN"] = ""
 
 from app.config import settings
 

@@ -17,6 +17,7 @@ class EntryType(str, enum.Enum):
 class OrderStatus(str, enum.Enum):
     RECEIVED = "received"
     CONFIRMED = "confirmed"
+    READY = "ready"
     OUT_OF_STOCK = "out_of_stock"
     DELIVERED = "delivered"
     CANCELLED = "cancelled"

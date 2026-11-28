@@ -1,35 +1,109 @@
-# Render Blueprint for VyapAI — one-click deploy of the FastAPI app.
+# Render Blueprint for VyapAI — same definition as the repository-root
+# render.yaml. Render looks for render.yaml at the REPOSITORY ROOT, so that
+# copy is the one that gets used; this file exists so that pointing a Blueprint
+# at `vyapai/render.yaml` also works.
 #
-# Prereq: create a free Postgres at https://neon.com first, copy its
-# connection string (keep the +psycopg2 form, see README), then create the
-# service:
-#   Render dashboard → New → Blueprint → point at this repo
-# (or New Web Service → Docker and paste the env vars below manually).
+# Deploy: Render Dashboard -> New -> Blueprint -> pick this repo. Render finds
+# the root render.yaml automatically, then prompts for the `sync: false` values.
+# Full walkthrough: docs/RENDER_DEPLOY.md
 #
-# The free plan sleeps after ~15 min idle and cold-wakes in ~60s — fine for
-# a demo/pilot; the sleep does not affect Telegram webhook delivery once a
-# real traffic pattern exists (Telegram retries).
+# Database note: this blueprint expects an EXTERNAL Postgres URL (Neon free tier
+# is recommended — it does not expire). Render's own free Postgres is deleted 30
+# days after creation; see the commented block at the bottom.
+
 services:
   - type: web
     name: vyapai
     runtime: docker
     plan: free
+    region: singapore          # closest Render region to India
+    rootDir: vyapai
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /health
-    # .env.example stays authoritative for every optional integration var —
-    # add GROQ_API_KEY / TELEGRAM_* etc. in the dashboard when you get them.
+    autoDeploy: true
+    # Migrations run before the server binds, so a fresh database is always at
+    # Alembic head. Render injects PORT (10000 by default); the image must
+    # listen on it, not on a hardcoded 8000.
+    dockerCommand: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
     envVars:
+      # --- Core -------------------------------------------------------------
+      # production (not development): in development mode the API answers
+      # login requests with the OTP in the response body (dev_echo), which on
+      # a public URL would let anyone sign in as the shop.
       - key: APP_ENV
-        value: development   # demo deploy: init_db() creates tables; no WHATSAPP_APP_SECRET needed yet
-      - key: DATABASE_URL
-        sync: false          # paste your Neon string in the dashboard (postgres+psycopg2://…)
+        value: production
       - key: SECRET_KEY
         generateValue: true
+      # Required only because APP_ENV=production refuses to boot without it
+      # (it guards the WhatsApp webhook signature). No WhatsApp number is in
+      # use, so a generated value simply keeps that endpoint closed.
+      - key: WHATSAPP_APP_SECRET
+        generateValue: true
+      # Postgres URL. Neon example (keep the psycopg2 driver name):
+      #   postgresql+psycopg2://user:pass@ep-xxx.aws.neon.tech/vyapai?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+
+      # --- Telegram bot -----------------------------------------------------
+      # Token from @BotFather. The secret token must be A-Z a-z 0-9 _ - only
+      # (Telegram rejects anything else), so it is pasted rather than generated:
+      #   python -c "import secrets; print(secrets.token_urlsafe(32))"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_SECRET_TOKEN
+        sync: false
+
+      # --- Order intake / speech -------------------------------------------
+      - key: GROQ_API_KEY          # voice notes + text structuring (free tier)
+        sync: false
+      - key: GEMINI_API_KEY        # bill-photo OCR (free tier)
+        sync: false
+
+      # --- UPI payment links ------------------------------------------------
+      - key: UPI_PAYEE_VPA
+        sync: false
+      - key: UPI_PAYEE_NAME
+        sync: false
+
+      # --- Login OTP delivery ----------------------------------------------
+      # Required in production: without a working channel the login endpoint
+      # answers 503 instead of leaking a code. Gmail needs an App Password
+      # (Google Account -> Security -> 2-Step Verification -> App passwords).
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+
+      # --- Behaviour --------------------------------------------------------
+      - key: MEDIA_BACKEND
+        value: local             # ephemeral: switch to r2 + R2_* for durable media
+      - key: AUTO_CONFIRM_PUBLIC_ORDERS
+        value: "1"
+      - key: PUBLIC_ORDER_RATE_LIMIT_PER_HOUR
+        value: "12"
       - key: MAX_AUTO_APPROVE_AMOUNT_INR
         value: "50000"
-      - key: MEDIA_BACKEND
-        value: local         # ephemeral on free tier; set r2 + R2_* vars for durable media
-      # Live bot (add when ready):
-      # - key: TELEGRAM_BOT_TOKEN
-      #   sync: false
-      # - key: TELEGRAM_SECRET_TOKEN
-      #   generateValue: true
+
+# --- Alternative: Render-managed Postgres ------------------------------------
+# Free, but the database AND ITS DATA are deleted 30 days after creation
+# (14-day grace period). Only use this for a throwaway demo.
+#
+# databases:
+#   - name: vyapai-db
+#     plan: free
+#     region: singapore
+#     databaseName: vyapai
+#     user: vyapai
+#
+# ...and replace the DATABASE_URL entry above with:
+#       - key: DATABASE_URL
+#         fromDatabase:
+#           name: vyapai-db
+#           property: connectionString

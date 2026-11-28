@@ -20,8 +20,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from pathlib import Path
+
+# Allow direct execution: python scripts/telegram_poller.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings
 from app.db.session import SessionLocal

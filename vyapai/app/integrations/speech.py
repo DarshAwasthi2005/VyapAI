@@ -30,37 +30,73 @@ class TranscriptionResult:
     backend: str
 
 
-def _which_backend() -> str:
+def _which_backends() -> list[str]:
+    """Configured backends in preference order. A caller tries each in turn:
+    if the preferred one is unreachable/stubbed, the next takes over instead
+    of killing the voice path entirely (a half-configured environment must
+    never stop a working one, e.g. a Vosk server up while Bhashini's HTTP
+    client is still a stub)."""
+    backends: list[str] = []
+    if settings.groq_api_key:
+        backends.append("groq")      # real hosted Whisper — works today
     if settings.bhashini_api_key and settings.bhashini_endpoint:
-        return "bhashini"
+        backends.append("bhashini")
     if settings.indic_whisper_endpoint:
-        return "indic_whisper"
+        backends.append("indic_whisper")
     if settings.vosk_endpoint:
-        return "vosk"
-    raise NotConfiguredError(
-        "speech",
-        [
-            "VOSK_ENDPOINT (self-hosted, free)",
-            "or BHASHINI_API_KEY + BHASHINI_ENDPOINT (PoC-only free)",
-            "or INDIC_WHISPER_ENDPOINT",
-        ],
-    )
+        backends.append("vosk")
+    return backends
+
+
+def _which_backend() -> str:
+    """The single preferred backend, for callers that want to know which
+    one transcribed. Raises NotConfiguredError when nothing is configured."""
+    backends = _which_backends()
+    if not backends:
+        raise NotConfiguredError(
+            "speech",
+            [
+                "VOSK_ENDPOINT (self-hosted, free)",
+                "or BHASHINI_API_KEY + BHASHINI_ENDPOINT (PoC-only free)",
+                "or INDIC_WHISPER_ENDPOINT",
+            ],
+        )
+    return backends[0]
 
 
 def transcribe(audio_bytes: bytes, hint_language: str | None = None) -> TranscriptionResult:
-    """Transcribe a short (<=10s) voice note.
+    """Transcribe a short (<=10s) voice note, trying every configured
+    backend in preference order until one succeeds.
 
-    Raises NotConfiguredError if no backend is set up, UpstreamError on API
-    failure. Callers (agents/graph_b2b.py) should catch both and fall back to
-    asking the merchant to type the entry instead.
-    """
-    backend = _which_backend()
+    Raises NotConfiguredError if NO backend is set up; UpstreamError only if
+    EVERY configured one failed. Callers (agents/graph_b2b.py, webhooks)
+    catch both and fall back to asking the sender to type instead."""
+    backends = _which_backends()
+    if not backends:
+        raise NotConfiguredError(
+            "speech",
+            [
+                "VOSK_ENDPOINT (self-hosted, free)",
+                "or BHASHINI_API_KEY + BHASHINI_ENDPOINT (PoC-only free)",
+                "or INDIC_WHISPER_ENDPOINT",
+            ],
+        )
 
-    if backend == "bhashini":
-        return _transcribe_bhashini(audio_bytes, hint_language)
-    if backend == "vosk":
-        return _transcribe_vosk(audio_bytes, hint_language)
-    return _transcribe_indic_whisper(audio_bytes, hint_language)
+    last_error: UpstreamError | None = None
+    for backend in backends:
+        try:
+            if backend == "groq":
+                return _transcribe_groq(audio_bytes, hint_language)
+            if backend == "bhashini":
+                return _transcribe_bhashini(audio_bytes, hint_language)
+            if backend == "vosk":
+                return _transcribe_vosk(audio_bytes, hint_language)
+            return _transcribe_indic_whisper(audio_bytes, hint_language)
+        except UpstreamError as e:
+            last_error = e
+            continue
+    assert last_error is not None  # at least one backend was attempted
+    raise last_error
 
 
 def _transcribe_vosk(audio_bytes: bytes, hint_language: str | None) -> TranscriptionResult:
@@ -99,6 +135,43 @@ def _transcribe_vosk(audio_bytes: bytes, hint_language: str | None) -> Transcrip
         language=data.get("language", hint_language or "hi"),
         confidence=float(data.get("confidence", 0.5)),
         backend="vosk",
+    )
+
+
+def _transcribe_groq(audio_bytes: bytes, hint_language: str | None) -> TranscriptionResult:
+    """OpenAI-compatible hosted Whisper on Groq's free tier — the zero-setup
+    path for WhatsApp/Telegram voice notes (ogg/opus goes straight up, no
+    local model server needed). POST multipart to /audio/transcriptions:
+    supports flac/mp3/mp4/mpeg/mpga/m4a/ogg/wav/webm up to 25 MB on the
+    free tier; `language` (ISO-639-1) improves accuracy/latency for a
+    vernacular order note."""
+    import httpx
+
+    if not settings.groq_api_key:
+        raise NotConfiguredError("speech", ["GROQ_API_KEY"])
+    try:
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            data={
+                "model": settings.groq_asr_model,
+                "response_format": "verbose_json",
+                "language": hint_language or "hi",
+            },
+            files={"file": ("voice_note.ogg", audio_bytes, "audio/ogg")},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise UpstreamError(f"Groq ASR call failed ({e.response.status_code}): {e}") from e
+    except httpx.HTTPError as e:
+        raise UpstreamError(f"Could not reach Groq ASR: {e}") from e
+    data = resp.json()
+    return TranscriptionResult(
+        text=data.get("text", ""),
+        language=data.get("language") or hint_language or "hi",
+        confidence=float(data.get("confidence", 0.5)),
+        backend="groq",
     )
 
 

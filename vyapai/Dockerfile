@@ -23,9 +23,13 @@ COPY migrations ./migrations
 RUN useradd --create-home vyapai && chown -R vyapai:vyapai /srv
 USER vyapai
 
+# Render (and most PaaS) inject PORT and route to it; 8000 stays the default
+# for docker compose and plain `docker run`.
+ENV PORT=8000
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -fsS "http://localhost:${PORT:-8000}/health" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Migrations first (idempotent — a no-op once the DB is at head), then serve.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

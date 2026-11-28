@@ -36,6 +36,43 @@ def send(channel: str, chat_id: str, body: str,
         return ChannelOutcome(False, str(e))
 
 
+def send_photo(channel: str, chat_id: str, upi_link: str, caption: str) -> ChannelOutcome:
+    """Send the payment QR code for `upi_link` with `caption` as its text. Only Telegram can receive unattended images today — WhatsApp Cloud API needs a hosted-media upload per unique image, so a WhatsApp buyer gets the clickable UPI link as a plain message instead."""
+    try:
+        if channel == "telegram":
+            from app.integrations import qr
+
+            telegram.send_photo(chat_id, qr.qr_png_bytes(upi_link), caption=caption)
+        elif channel == "whatsapp":
+            if caption:
+                whatsapp.send_text_message(chat_id, caption)
+            return ChannelOutcome(bool(caption), None if caption else "no link text to send")
+        else:
+            return ChannelOutcome(False, f"unknown channel: {channel}")
+        return ChannelOutcome(True)
+    except Exception as e:
+        return ChannelOutcome(False, str(e))
+
+
+def send_image(channel: str, chat_id: str, png: bytes, caption: str = "") -> ChannelOutcome:
+    """Send an arbitrary PNG (a rendered bill, a QR, ...) with a caption.
+    Same channel asymmetry as send_photo: Telegram carries real images;
+    WhatsApp Cloud API would need a per-image hosted-media upload, so a
+    WhatsApp buyer gets the caption text today."""
+    try:
+        if channel == "telegram":
+            telegram.send_photo(chat_id, png, caption=caption)
+        elif channel == "whatsapp":
+            if caption:
+                whatsapp.send_text_message(chat_id, caption)
+            return ChannelOutcome(bool(caption), None if caption else "no caption to send")
+        else:
+            return ChannelOutcome(False, f"unknown channel: {channel}")
+        return ChannelOutcome(True)
+    except Exception as e:
+        return ChannelOutcome(False, str(e))
+
+
 def is_configured(channel: str) -> bool:
     """Whether OUTBOUND sends on this channel can work right now (env only)."""
     if channel == "telegram":

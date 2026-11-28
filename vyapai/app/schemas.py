@@ -106,8 +106,16 @@ class WhatsAppOrderWebhook(BaseModel):
 
     Offer: the person making the bill picks EITHER a percent discount OR a
     flat cash amount — offer_type carries which, offer_value the number.
-    Unknown/absent offers are simply ignored."""
+    Unknown/absent offers are simply ignored.
+
+    Offline: a walk-in order placed at the counter (no buyer chat). Items are
+    checked against the shop's inventory, in-stock items are handed over
+    (stock drops) and the order skips the availability-verification wait.
+    payment_method settles it on the spot — the payment record lands on the
+    order and a Sales row in the ledger."""
     from_number: str
     message_text: str
     offer_type: str | None = Field(default=None, pattern="^(percent|cash)$")
     offer_value: float | None = Field(default=None, ge=0)
+    offline: bool = False
+    payment_method: str | None = Field(default=None, pattern="^(cash|upi)$")

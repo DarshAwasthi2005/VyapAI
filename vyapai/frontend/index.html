@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>VyapAI — Your Business, Your Books, Automatically</title>
-<link rel="stylesheet" href="styles.css?v=11">
+<link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
 
@@ -120,6 +120,7 @@
   <header class="topbar">
     <div class="brand small"><span class="brand-mark">₹</span><h2>VyapAI</h2></div>
     <div id="shop-name" class="shop-name"></div>
+    <span class="live-pill" id="live-pill" title="This page updates itself — no refresh needed"><span class="live-dot"></span><span data-i18n="live_badge">Live</span></span>
     <select id="dash-lang" class="topbar-select" title="Language for your dashboard and agent messages">
       <option value="hi">हिन्दी</option>
       <option value="en">English</option>
@@ -179,14 +180,24 @@
       <!-- place order -->
       <div class="card" id="card-order">
         <h3 data-i18n="order_title">🛒 Place a customer order</h3>
-                <p class="hint" data-i18n="order_hint">One item per order — enter one, then the next. Try: <em>"3 kg sugar by 4 PM"</em>. Demo stock: sugar, soap.</p>
+                <p class="hint" data-i18n="order_hint">Put the whole list in one order — quantity, unit and items together. Try: <em>"3 kg sugar and 2 soap by 4 PM"</em>. Demo stock: sugar, soap.</p>
         <p class="hint" style="margin-top:-6px">WhatsApp-connected: orders texted, voice-noted or sent as a list photo to the linked chat land in the table below — quantity and unit included.</p>
         <form id="order-form">
+          <label class="check-row"><input id="order-offline" type="checkbox">
+            <span data-i18n="l_offline">Offline order (walk-in, paid at the counter)</span>
+          </label>
+          <label id="order-pay-row" class="hidden"><span data-i18n="l_pay_now">Payment at placement</span>
+            <select id="order-pay">
+              <option value="" data-i18n="pay_later">Not paid yet — settle later</option>
+              <option value="cash" data-i18n="pay_cash">💵 Cash received</option>
+              <option value="upi" data-i18n="pay_upi">✅ Paid via UPI</option>
+            </select>
+          </label>
           <label><span data-i18n="l_buyer">Buyer WhatsApp number</span> <span class="req">*</span>
             <input id="order-buyer" type="tel" required maxlength="15" inputmode="numeric" value="9876500001">
           </label>
-          <label><span data-i18n="l_order">Order — quantity, unit and item</span> <span class="req">*</span>
-            <input id="order-text" type="text" required placeholder="3 kg sugar by 4 PM" maxlength="60">
+          <label><span data-i18n="l_order">Order — quantity, unit and items (one message)</span> <span class="req">*</span>
+            <input id="order-text" type="text" required placeholder="3 kg sugar and 2 cartons of soap by 4 PM" maxlength="200">
           </label>
           <label><span data-i18n="l_offer">Offer</span> <span class="opt" data-i18n="offer_hint">(optional — percent or cash, your choice)</span>
             <span class="offer-row">
@@ -284,7 +295,7 @@
         </div>
         <div class="help-block">
           <h4 data-i18n="help_h4">💸 Payments</h4>
-          <p data-i18n="help_y4">UPI orders confirm themselves the moment the payment link is generated. Cash orders wait for you to tap 💵 Confirm cash in the orders table — nothing is counted until you do.</p>
+          <p data-i18n="help_y4">Every payment — UPI link or cash — stays pending until money is actually in hand: tap 💵 Confirm cash, or ✅ Paid via UPI (same buttons arrive on your linked Telegram chat, plus /paid). The moment you confirm, the buyer is sent the itemised bill automatically.</p>
         </div>
         <div class="help-block">
           <h4 data-i18n="help_h5">🔗 Channels</h4>
@@ -302,11 +313,11 @@
       </div>
     </div>
 
-    <p class="demo-note" data-i18n="demo_note">Demo mode: UPI payments confirm themselves the moment the order is placed (a licensed PSP webhook keeps it authoritative at go-live); cash orders wait for you to tap <strong>💵 Confirm cash</strong>. Login is real: your shop is protected by phone/email + a 6-digit OTP.</p>
+    <p class="demo-note" data-i18n="demo_note">Demo mode: every payment (UPI link or cash) stays PENDING until money is actually in your hand — confirm with <strong>💵 Confirm cash</strong> or <strong>✅ Paid via UPI</strong> (a licensed PSP webhook keeps it authoritative at go-live). Login is real: your shop is protected by phone/email + a 6-digit OTP.</p>
   </main>
 </section>
 
-<script src="i18n.js?v=12"></script>
-<script src="app.js?v=12"></script>
+<script src="i18n.js?v=17"></script>
+<script src="app.js?v=17"></script>
 </body>
 </html>

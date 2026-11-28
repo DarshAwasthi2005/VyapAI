@@ -70,23 +70,46 @@ class BillExtraction:
     raw_model_output: str = ""
 
 
-def extract_bill(image_bytes: bytes, media_type: str = "image/jpeg") -> BillExtraction:
-    """Backend order (all free, see docs/ZERO_COST_BLUEPRINT.md):
-    Gemini -> Groq -> Ollama. Gemini's free tier may use inputs to improve
-    its products, so prefer Groq for real merchant bills."""
+def _vision_backends() -> list[str]:
+    """Configured backends in preference order: Gemini, then a local Ollama
+    server. Groq is NOT a vision backend anymore — its catalog dropped image
+    models (verified against GET /openai/v1/models in Oct 2026), so adding
+    it here would just burn a 404 on every photo. Callers try each in turn:
+    one dead/half-configured backend must never stop a working one."""
+    backends: list[str] = []
     if settings.gemini_api_key:
-        raw = _call_gemini_vision(image_bytes, media_type)
-    elif settings.groq_api_key:
-        raw = _call_groq_vision(image_bytes, media_type)
-    elif settings.ollama_base_url and settings.ollama_vision_model:
-        raw = _call_ollama_vision(image_bytes)
-    else:
+        backends.append("gemini")
+    if settings.ollama_base_url and settings.ollama_vision_model:
+        backends.append("ollama")
+    return backends
+
+
+def extract_bill(image_bytes: bytes, media_type: str = "image/jpeg") -> BillExtraction:
+    """Try every configured backend in preference order until one succeeds:
+    Gemini -> Ollama (all free; see docs/ZERO_COST_BLUEPRINT.md). Note: a
+    hosted call sends the buyer's handwritten list to Google's API."""
+    backends = _vision_backends()
+    if not backends:
         raise NotConfiguredError(
             "vision/OCR",
-            ["GEMINI_API_KEY", "or GROQ_API_KEY", "or OLLAMA_BASE_URL + OLLAMA_VISION_MODEL"],
+            ["GROQ_API_KEY", "or GEMINI_API_KEY", "or OLLAMA_BASE_URL + OLLAMA_VISION_MODEL"],
         )
 
-    return _parse_extraction(raw)
+    last_error: UpstreamError | None = None
+    for backend in backends:
+        try:
+            if backend == "groq":
+                raw = _call_groq_vision(image_bytes, media_type)
+            elif backend == "gemini":
+                raw = _call_gemini_vision(image_bytes, media_type)
+            else:
+                raw = _call_ollama_vision(image_bytes)
+            return _parse_extraction(raw)
+        except UpstreamError as e:
+            last_error = e
+            continue
+    assert last_error is not None  # at least one backend was attempted
+    raise last_error
 
 
 def _call_groq_vision(image_bytes: bytes, media_type: str) -> str:
@@ -144,48 +167,73 @@ def _call_groq_vision(image_bytes: bytes, media_type: str) -> str:
 
 
 def _call_gemini_vision(image_bytes: bytes, media_type: str) -> str:
-    """POST to Google's Gemini API. See module docstring for free-tier setup."""
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent"
-    )
-    try:
-        resp = httpx.post(
-            url,
-            headers={
-                "x-goog-api-key": settings.gemini_api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "contents": [{
-                    "parts": [
-                        {"inline_data": {"mime_type": media_type,
-                                          "data": base64.b64encode(image_bytes).decode()}},
-                        {"text": EXTRACTION_PROMPT},
-                    ]
-                }],
-                "generationConfig": {"responseMimeType": "application/json"},
-            },
-            timeout=30,
+    """POST to Google's Gemini API. See module docstring for free-tier setup.
+
+    503 ("high demand") is a documented TRANSIENT — two short retries usually
+    clear it, so a buyer's photo order doesn't bounce back for a_Google_
+    capacity blip."""
+    # Free-tier 503s ("high demand") hit ONE model variant at a time — a
+    # sibling flash variant often has capacity when the configured one does
+    # not, so walk a small ladder before giving up.
+    model_ladder = [settings.gemini_model, "gemini-flash-latest"]
+    seen = set()
+    candidates = [m for m in model_ladder if not (m in seen or seen.add(m)) and m]
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": media_type,
+                                  "data": base64.b64encode(image_bytes).decode()}},
+                {"text": EXTRACTION_PROMPT},
+            ]
+        }],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    headers = {
+        "x-goog-api-key": settings.gemini_api_key,
+        "Content-Type": "application/json",
+    }
+    resp = None
+    import time
+
+    for model in candidates:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent"
         )
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            raise UpstreamError(
-                "Gemini free-tier rate limit hit. Wait a minute and retry, unset "
-                "GEMINI_API_KEY to fall back to the local Ollama backend, or see "
-                "https://ai.google.dev/gemini-api/docs/pricing for current limits."
-            ) from e
-        if e.response.status_code in (401, 403):
-            raise UpstreamError(
-                "Gemini rejected the API key — check GEMINI_API_KEY in .env "
-                "(get a fresh one at https://aistudio.google.com/apikey)."
-            ) from e
-        raise UpstreamError(
-            f"Gemini vision call failed ({e.response.status_code}): {e.response.text[:200]}"
-        ) from e
-    except httpx.HTTPError as e:
-        raise UpstreamError(f"Gemini vision call failed: {e}") from e
+        for attempt in range(3):  # 3 attempts: 0s, +2s, +4s — for 503 spikes only
+            try:
+                # 120 s: free-tier capacity spikes queue requests for well over
+                # a minute before answering; Render/class networks return fast
+                # at the head but this client tolerates the slow tail too.
+                resp = httpx.post(url, headers=headers, json=payload, timeout=120)
+                resp.raise_for_status()
+                break
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 503 and attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                if e.response.status_code == 429:
+                    raise UpstreamError(
+                        "Gemini free-tier rate limit hit. Wait a minute and retry, unset "
+                        "GEMINI_API_KEY to fall back to the local Ollama backend, or see "
+                        "https://ai.google.dev/gemini-api/docs/pricing for current limits."
+                    ) from e
+                if e.response.status_code in (401, 403):
+                    raise UpstreamError(
+                        "Gemini rejected the API key — check GEMINI_API_KEY in .env "
+                        "(get a fresh one at https://aistudio.google.com/apikey)."
+                    ) from e
+                if e.response.status_code == 503 and model is not candidates[-1]:
+                    break  # jump to the next model in the ladder
+                raise UpstreamError(
+                    f"Gemini vision call failed ({e.response.status_code}): {e.response.text[:200]}"
+                ) from e
+            except httpx.HTTPError as e:
+                raise UpstreamError(f"Gemini vision call failed: {e}") from e
+        else:
+            continue  # all attempts on this model exhausted → next model
+        if resp is not None and resp.status_code == 200:
+            break
 
     data = resp.json()
     try:
@@ -229,6 +277,16 @@ def _call_ollama_vision(image_bytes: bytes) -> str:
     return resp.json().get("response", "")
 
 
+def _num(value) -> float:
+    """Models legitimately return null for prices/quantities they can't read
+    (an ORDER LIST has no prices at all) — treat as 0.0 instead of crashing
+    the whole extraction."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _parse_extraction(raw: str) -> BillExtraction:
     try:
         data = json.loads(raw)
@@ -240,9 +298,9 @@ def _parse_extraction(raw: str) -> BillExtraction:
     items = [
         LineItem(
             description=li["description"],
-            quantity=float(li["quantity"]),
-            unit_price=float(li["unit_price"]),
-            amount=float(li["amount"]),
+            quantity=_num(li.get("quantity")),
+            unit_price=_num(li.get("unit_price")),
+            amount=_num(li.get("amount")),
         )
         for li in data.get("line_items", [])
     ]

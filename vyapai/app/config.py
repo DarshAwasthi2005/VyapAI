@@ -47,7 +47,12 @@ class Settings:
     #      but needs a model pulled locally and is slower / less accurate.
     # See app/integrations/vision.py for the full picture.
     gemini_api_key: str | None = field(default_factory=lambda: _env("GEMINI_API_KEY"))
-    gemini_model: str | None = field(default_factory=lambda: _env("GEMINI_MODEL", "gemini-2.5-flash"))
+    gemini_model: str | None = field(
+        # "-latest" alias tracks Google's current model automatically — pinned
+        # version names (gemini-2.5-flash …) get retired and start 404-ing on
+        # new keys, which silently killed photo orders once already.
+        default_factory=lambda: _env("GEMINI_MODEL", "gemini-flash-latest")
+    )
     ollama_base_url: str | None = field(
         default_factory=lambda: _env("OLLAMA_BASE_URL", "http://localhost:11434")
     )
@@ -56,17 +61,28 @@ class Settings:
     )
 
     # Groq — FREE tier, no card, ~1-minute signup at https://console.groq.com.
-    # Best free hosted option for BOTH text structuring and bill-photo vision:
-    # llama-3.2-11b-vision handles images, the text models handle structuring.
+    # TEXT structuring only: its catalog no longer serves any IMAGE model
+    # (verified GET /openai/v1/models, Oct 2026 — default updated to a text
+    # model that exists). Bill-photo OCR goes through Gemini/Ollama instead.
+    # Text models: modern catalog is gpt-oss/qwen/allam (llama-3.3 retired).
     # Unlike Gemini's free tier, Groq documents that inference inputs/outputs
     # are not retained by default — still pseudonymize PII (see docs/
     # ZERO_COST_BLUEPRINT.md) before any hosted call.
     groq_api_key: str | None = field(default_factory=lambda: _env("GROQ_API_KEY"))
     groq_vision_model: str = field(
+        # DEAD as of Oct 2026 (Groq dropped image models); kept so the adapter
+        # still has a name if Groq re-adds vision. Vision layout: gemini/ollama.
         default_factory=lambda: _env("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
     )
     groq_text_model: str = field(
-        default_factory=lambda: _env("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile")
+        # llama-3.3-70b-versatile is no longer in Groq's catalog; gpt-oss-120b
+        # is the current structured-JSON workhorse there.
+        default_factory=lambda: _env("GROQ_TEXT_MODEL", "openai/gpt-oss-120b")
+    )
+    groq_asr_model: str = field(
+        # OpenAI-compatible speech-to-text (whisper-large-v3-turbo: ₹ cheapest
+        # per hour, transcription — no translation needed for order intake).
+        default_factory=lambda: _env("GROQ_ASR_MODEL", "whisper-large-v3-turbo")
     )
 
     # Vosk — self-hosted ASR server, completely free, Apache-2.0 models.
@@ -135,6 +151,21 @@ class Settings:
     # Guardrails
     max_auto_approve_amount_inr: float = field(
         default_factory=lambda: float(_env("MAX_AUTO_APPROVE_AMOUNT_INR", "50000"))
+    )
+
+    # Public storefront ordering: anyone messaging the bot (not only the
+    # shop's own linked chat) can place an order. The intake AI verifies
+    # availability against the shop's inventory table and auto-confirms
+    # in-stock orders (set AUTO_CONFIRM_PUBLIC_ORDERS=0 to keep the human
+    # verify flow for every order instead). Rate limit caps how many
+    # storefront orders one buyer chat can start per hour — spam guardrail.
+    auto_confirm_public_orders: bool = field(
+        default_factory=lambda: (
+            _env("AUTO_CONFIRM_PUBLIC_ORDERS", "1").strip().lower() not in ("0", "false", "no")
+        )
+    )
+    public_order_rate_limit_per_hour: int = field(
+        default_factory=lambda: int(_env("PUBLIC_ORDER_RATE_LIMIT_PER_HOUR", "12"))
     )
 
 

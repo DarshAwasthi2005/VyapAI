@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,7 @@ from app.db.session import get_db
 from app.integrations import media
 from app.schemas import LedgerEntryOut, MerchantCreate, MerchantOut, TextBillEntryRequest
 from app.services import auth as authsvc
+from app.services import fulfillment
 from app.services.accounting import build_purchase_transaction, build_sale_transaction
 from app.services.audit import record_audit
 from app.services.credit import build_cash_flow_summary, loan_readiness_score
@@ -127,12 +129,51 @@ def get_orders(merchant_id: str, db: Session = Depends(get_db), authorization: s
                         "item_name": li.item_name,
                         "quantity": li.quantity,
                         "unit": li.unit,
+                        "in_stock": li.in_stock,
                     }
                     for li in o.line_items
                 ],
             }
         )
     return out
+
+
+class AvailabilityDecision(BaseModel):
+    items_missing: list[str] = []   # names NOT available; empty → all available
+
+
+@router.post("/merchants/{merchant_id}/orders/{order_id}/availability")
+def verify_availability(
+    merchant_id: str, order_id: str,
+    payload: AvailabilityDecision,
+    db: Session = Depends(get_db),
+    authorization: str = Header(default=""),
+):
+    """THE owner availability verify step (same path the bot's /avail and
+    /missing commands use): until this fires the buyer has seen nothing but
+    a receipt-ack. items_missing=["rice"] flags just that item;
+    items_missing=["all"] (or empty remaining set) refuses the order."""
+    scoped_merchant(merchant_id, db, authorization)
+    order = db.get(Order, order_id)
+    if order is None or order.merchant_id != merchant_id:
+        raise HTTPException(404, "Unknown order")
+    return fulfillment.verify_order_availability(db, order, payload.items_missing)
+
+
+@router.post("/merchants/{merchant_id}/orders/{order_id}/ready")
+def mark_order_ready(
+    merchant_id: str, order_id: str,
+    db: Session = Depends(get_db),
+    authorization: str = Header(default=""),
+):
+    """The shop-owner packing step: confirm the order is ready for
+    collection. Buyer-facing channels (Telegram/WhatsApp) are told on the
+    spot — the same path the bot's /ready command uses."""
+    scoped_merchant(merchant_id, db, authorization)
+    order = db.get(Order, order_id)
+    if order is None or order.merchant_id != merchant_id:
+        raise HTTPException(404, "Unknown order")
+    return fulfillment.mark_order_ready(db, order)
 
 
 @router.get("/merchants/{merchant_id}/approvals")

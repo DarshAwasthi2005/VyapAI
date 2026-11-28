@@ -144,6 +144,30 @@ def fetch_recent_updates(offset: int = 0, timeout_seconds: int = 0) -> list[dict
     return data.get("result", [])
 
 
+def send_photo(chat_id: str | int, photo: bytes, caption: str = "") -> dict:
+    """Upload a PNG (e.g. a payment QR code) with an optional caption via
+    Bot API sendPhoto (multipart). The image itself carries no UPI intent —
+    buyers scan it in any UPI app — so the caption always repeats the
+    tappable deep link as text, for buyers who prefer tapping over scanning."""
+    payload = {"chat_id": str(chat_id), "caption": caption[:1024]}
+    try:
+        resp = httpx.post(
+            _api_url("sendPhoto"),
+            data=payload,
+            files={"photo": ("payment-qr.png", photo, "image/png")},
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise UpstreamError(f"Telegram sendPhoto failed ({e.response.status_code}): {e.response.text[:200]}") from e
+    except httpx.HTTPError as e:
+        raise UpstreamError(f"Could not reach Telegram API: {e}") from e
+    data = resp.json()
+    if not data.get("ok"):
+        raise UpstreamError(f"Telegram API rejected sendPhoto: {data}")
+    return data
+
+
 def extract_callback(update: dict) -> dict | None:
     """Unwrap an inline-button tap (a callback_query update).
 

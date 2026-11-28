@@ -1,7 +1,8 @@
 """
-Parses a free-text order message into ONE simple order entry — the first
-"<qty> <unit> <item>" match is the order. Merchants enter one item at a
-time; no multi-item splitting, no LLM tier.
+Parses a free-text order message into ONE order with ALL of its items: a
+whole shopping list ("3 kg sugar and 2 cartons of soap by 4 PM") becomes
+two line items on a single order. No LLM tier - structure + vernacular
+normalisation only.
 
 A deterministic regex handles the common "<qty> <unit> of <item>" pattern in
 English/Hinglish, needs no API key, and is what tests/test_orders.py
@@ -60,6 +61,9 @@ _ITEMS = {
     "मसाला": "masala", "masala": "masala",
 }
 
+# List connectors shoppers actually use between items.
+_CONNECTORS = {"and", "aur", "और"}
+
 # Politeness/filler verbs that follow an item in speech — dropped so they
 # never leak into the item name.
 _FILLERS = {"भेजो", "भेज", "दो", "दीजिए", "दीजिये", "चाहिए", "चाहिये", "please",
@@ -101,6 +105,9 @@ def normalize_vernacular(message: str) -> str:
         if bare in _FILLERS:
             out.append(" ")
             continue
+        if bare in _CONNECTORS:
+            out.append(" and ")
+            continue
         mapped = (_NUMERALS.get(bare) or _LATIN_NUMERALS.get(bare)
                   or _UNITS.get(bare) or _ITEMS.get(bare))
         if mapped:
@@ -112,12 +119,29 @@ def normalize_vernacular(message: str) -> str:
     return "".join(out)
 
 
+# Primary shape: "<qty> <unit> of <item>". The item name may contain spaces
+# ("washing powder") and is cut at a list boundary (comma / "and" / "by
+# <time>" / newline / end) so finditer picks up the NEXT item from the same
+# message: one regex, whole shopping list.
+_ITEM_STOP = r"(?=(?:[,;:\n]|\band\b|\bby\b|$))"
 _QTY_UNIT_ITEM = re.compile(
-    r"(?P<qty>\d+(?:\.\d+)?)\s*(?P<unit>bags?|cartons?|kg|kilograms?|box(?:es)?|packets?|pieces?|pcs?"
-    r"|litres?|liters?|ltrs?|dozens?|bottles?|sacks?|quintals?|grams?|gms?|crates?|units?)"
-    r"\s*(?:of\s*)?(?P<item>[a-zA-Z][a-zA-Z\s]*?)(?=(?:,|\band\b|\bby\b|$))",
+    r"\d+(?:\.\d+)?\s*(?:bags?|cartons?|kg|kilos?|kilograms?|box(?:es)?|packets?|pieces?|pcs?"
+    r"|litres?|liters?|ltrs?|dozens?|bottles?|sacks?|quintals?|grams?|gms?|crates?|units?|numbers?)"
+    r"\s*(?:of\s*)?[a-zA-Z][a-zA-Z\s]*?" + _ITEM_STOP,
     re.IGNORECASE,
 )
+# Secondary shape: a bare quantity before an item with NO unit — "2 soap",
+# "3 notebooks". Run on a copy of the message with the primary matches
+# blanked out, so it never re-parses part of a "<qty> <unit> <item>" match.
+_QTY_ITEM_BARE = re.compile(
+    r"(?<![\d.])(?P<qty>\d+(?:\.\d+)?)\s+(?P<item>[A-Za-z][A-Za-z\s]{1,}?)(?=(?:[,;:!?\n]|\band\b|\bby\b|$))",
+    re.IGNORECASE,
+)
+# Words that must never be taken for an item name in the bare-quantity pass
+# (times, units, and sentence filler like "5 things urgently").
+_NOT_ITEMS = ({"am", "pm", "oclock", "things", "stuff", "items", "urgent",
+               "urgently", "asap", "today", "tomorrow"}
+              | set(_UNITS.values()))
 _DEADLINE = re.compile(r"\bby\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)\b")
 
 
@@ -135,23 +159,64 @@ class ParsedOrder:
     parse_confidence: str  # "high" (order parsed) | "low" (needs human review)
 
 
+def _primary_items(message: str) -> tuple[list[ParsedLineItem], list[tuple[int, int]]]:
+    """All "<qty> <unit> <item>" matches, plus their spans so the bare-
+    quantity fallback can skip over already-parsed text."""
+    items: list[ParsedLineItem] = []
+    spans: list[tuple[int, int]] = []
+    for m in _QTY_UNIT_ITEM.finditer(message):
+        text = m.group(0)
+        q = re.search(r"\d+(?:\.\d+)?", text)
+        if not q:
+            continue
+        # unit = first letter-run after the qty (positions in text are exact:
+        # the match always STARTS with the qty)
+        u = re.search(r"[A-Za-z]+", text[q.end():], re.IGNORECASE)
+        if not u:
+            continue
+        # item = everything after the unit (plus an optional "of")
+        after_unit = text[q.end() + u.end():]
+        item_name = re.sub(r"^\s*of\s+", "", after_unit.strip(), flags=re.IGNORECASE).strip().rstrip(". ")
+        if item_name:
+            items.append(ParsedLineItem(
+                item_name=item_name,
+                quantity=float(q.group(0)),
+                unit=u.group(0).lower(),
+            ))
+            spans.append((m.start(), m.end()))
+    return items, spans
+
+
+def _bare_qty_items(message: str, taken: list[tuple[int, int]]) -> list[ParsedLineItem]:
+    """Fallback for "2 soap" — quantity with no unit word."""
+    if taken:
+        blanked = list(message)
+        for start, end in taken:
+            for i in range(start, min(end, len(blanked))):
+                if blanked[i] != "\n":
+                    blanked[i] = " "
+        message = "".join(blanked)
+    items = []
+    for m in _QTY_ITEM_BARE.finditer(message):
+        item = m.group("item").strip().rstrip(". ").lower()
+        words = item.replace(".", " ").split()
+        if not item or item in _NOT_ITEMS or any(w in _NOT_ITEMS for w in words):
+            continue
+        items.append(ParsedLineItem(
+            item_name=item,
+            quantity=float(m.group("qty")),
+            unit="units",
+        ))
+    return items
+
+
 def parse_order_text(message: str) -> ParsedOrder:
     message = normalize_vernacular(message)
     deadline_match = _DEADLINE.search(message)
     deadline = deadline_match.group(1) if deadline_match else None
 
-    items: list[ParsedLineItem] = []
-    # One entry at a time: only the FIRST "<qty> <unit> <item>" match is the
-    # order. Anything after "and" is ignored — send it as a second order.
-    m = _QTY_UNIT_ITEM.search(message)
-    if m:
-        item_name = m.group("item").strip().rstrip(".")
-        if item_name:
-            items.append(ParsedLineItem(
-                item_name=item_name,
-                quantity=float(m.group("qty")),
-                unit=m.group("unit").lower(),
-            ))
+    primary, spans = _primary_items(message)
+    items = primary + _bare_qty_items(message, spans)
 
     # Confidence heuristic: if we found no item but the message clearly has
     # digits (likely an order), flag for human review rather than silently

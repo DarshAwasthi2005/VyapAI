@@ -1,19 +1,46 @@
 from app.services.orders import check_inventory, normalize_vernacular, parse_order_text
 
 
-def test_parse_takes_only_first_item():
-    # One entry at a time: anything after "and" is ignored.
+def test_parse_multi_item_single_order():
+    # A whole shopping list in one message becomes ONE order with BOTH items.
     order = parse_order_text("Send 5 bags of sugar and 2 cartons of soap by 4 PM")
-    assert len(order.line_items) == 1
-    assert order.line_items[0].quantity == 5.0
-    assert order.line_items[0].unit == "bags"
-    assert "sugar" in order.line_items[0].item_name.lower()
+    assert len(order.line_items) == 2
+    by_name = {li.item_name.lower(): li for li in order.line_items}
+    sugar, soap = by_name["sugar"], by_name["soap"]
+    assert (sugar.quantity, sugar.unit) == (5.0, "bags")
+    assert (soap.quantity, soap.unit) == (2.0, "cartons")
     assert order.deadline_text == "4 PM"
     assert order.parse_confidence == "high"
-    # The second item goes in as its own simple order entry.
-    second = parse_order_text("2 cartons of soap")
-    assert len(second.line_items) == 1
-    assert second.line_items[0].item_name.lower().strip() == "soap"
+
+
+def test_parse_comma_and_newline_separated_items():
+    order = parse_order_text("3 kg sugar, 2 soap\n1 kg rice")
+    by_name = {li.item_name.lower(): li for li in order.line_items}
+    assert (by_name["sugar"].quantity, by_name["sugar"].unit) == (3.0, "kg")
+    assert (by_name["soap"].quantity, by_name["soap"].unit) == (2.0, "units")  # bare qty, no unit
+    assert (by_name["rice"].quantity, by_name["rice"].unit) == (1.0, "kg")
+
+
+def test_parse_hinglish_multi_item():
+    # "aur" = "and": the Hindi list connector joins items in one order.
+    order = parse_order_text("3 kg chini aur 2 kg aata bhejo")
+    by_name = {li.item_name.lower(): li for li in order.line_items}
+    assert (by_name["sugar"].quantity, by_name["sugar"].unit) == (3.0, "kg")
+    assert (by_name["flour"].quantity, by_name["flour"].unit) == (2.0, "kg")
+
+
+def test_parse_multi_item_totals_priced_together():
+    # End-to-end guarantee the caller cares about: one graph run prices the
+    # WHOLE list (sugar ₹42/kg + soap ₹30/carton, demo catalog).
+    from app.agents.graph_b2c import build_b2c_graph
+    state = build_b2c_graph().invoke({
+        "raw_message": "5 bags of sugar and 2 cartons of soap",
+        "stock_levels": {"sugar": 100.0, "soap": 50.0},
+        "unit_prices": {"sugar": 42.0, "soap": 30.0},
+    })
+    assert state["all_in_stock"] is True
+    assert state["total_amount"] == 42.0 * 5 + 30.0 * 2
+    assert len(state["line_items"]) == 2
 
 
 def test_parse_single_item_no_deadline():

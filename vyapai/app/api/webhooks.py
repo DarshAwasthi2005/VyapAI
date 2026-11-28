@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -25,6 +24,7 @@ from app.integrations import media, speech, telegram, vision, whatsapp
 from app.integrations.errors import NotConfiguredError, UpstreamError
 from app.services import auth as authsvc
 from app.services import channels as channelsvc
+from app.services import fulfillment
 from app.services import order_intake
 from app.services.orders import parse_order_text
 
@@ -143,18 +143,22 @@ async def receive_whatsapp_message(
                 after={"channel": "whatsapp"},
             )
 
-    # --- orders from the shop's own linked chat ---------------------------
+    # --- orders: the shop's own linked chat, then public storefront buyers -
     shop = order_intake.resolve_merchant_for_chat(db, "whatsapp", sender)
-    if shop is None:
-        return {"received": True, "handled": False}
+    if shop is not None:
+        if msg["kind"] == "text":
+            result = order_intake.parse_and_create(db, shop, sender, msg["text"], reply_channel="whatsapp")
+            return {"received": True, "handled": True, "source": "text", "order": result}
+        if msg["kind"] == "audio":
+            return _handle_voice_order(db, shop, sender, msg)
+        return _handle_photo_order(db, shop, sender, msg)
 
-    if msg["kind"] == "text":
-        result = order_intake.parse_and_create(db, shop, sender, msg["text"], reply_channel="whatsapp")
-        return {"received": True, "handled": True, "source": "text", "order": result}
-
-    if msg["kind"] == "audio":
-        return _handle_voice_order(db, shop, sender, msg)
-    return _handle_photo_order(db, shop, sender, msg)
+    # Not the shop's own chat — a PUBLIC buyer ordering on the storefront.
+    out = _storefront_order(db, "whatsapp", sender, msg)
+    if "order_id" in out:
+        return {"received": True, "handled": True,
+                "source": "storefront_whatsapp", "order": out}
+    return out   # already the full response shape (chooser/none from media)
 
 
 def _fmt_qty(q: float) -> str:
@@ -198,7 +202,9 @@ def _ask_buyer_to_type(db: Session, shop: Merchant, sender: str, what: str, erro
 
 
 def _handle_voice_order(db: Session, shop: Merchant, sender: str, msg: dict,
-                        channel: str = "whatsapp") -> dict:
+                        channel: str = "whatsapp",
+                        buyer_channel: str = None,
+                        buyer_chat_id: str = None) -> dict:
     """A voice note from the linked chat: download the audio, transcribe it
     through the speech adapter, then run the EXACT same typed-order intake
     with the transcript. No ASR is configured → ask the buyer to type.
@@ -212,13 +218,18 @@ def _handle_voice_order(db: Session, shop: Merchant, sender: str, msg: dict,
     if not transcript.strip():
         return _ask_buyer_to_type(db, shop, sender, "voice message", "nothing was understood", channel)
 
-    result = order_intake.parse_and_create(db, shop, sender, transcript, reply_channel=channel)
+    result = order_intake.parse_and_create(
+        db, shop, sender, transcript, reply_channel=channel,
+        buyer_channel=buyer_channel, buyer_chat_id=buyer_chat_id,
+    )
     return {"received": True, "handled": True, "source": "voice_note",
             "transcript": transcript, "order": result}
 
 
 def _handle_photo_order(db: Session, shop: Merchant, sender: str, msg: dict,
-                        channel: str = "whatsapp") -> dict:
+                        channel: str = "whatsapp",
+                        buyer_channel: str = None,
+                        buyer_chat_id: str = None) -> dict:
     """A photo of a handwritten order list from the linked chat: download
     the image, read the items with the vision/OCR adapter, and enter every
     item in one order. Items already carry quantity (+ unit when legible).
@@ -252,6 +263,7 @@ def _handle_photo_order(db: Session, shop: Merchant, sender: str, msg: dict,
     result = order_intake.create_from_structured(
         db, shop, sender,        raw_message=f"{_CHANNEL_LABEL.get(channel, channel)} order photo: {summary}",
         line_items=items, reply_channel=channel,
+        buyer_channel=buyer_channel, buyer_chat_id=buyer_chat_id,
     )
     return {"received": True, "handled": True, "source": "order_photo",
             "items": items, "order": result}
@@ -309,50 +321,31 @@ async def receive_payment_webhook(
         after={"status": payment.status.value, "method": payment.method,
                "transaction_ref": txn_ref},
     )
-    return {"updated": True}
+    # Confirmed money is a booked sale — post the Sales ledger row. The
+    # payment's ledger_transaction_group makes this idempotent: a replayed
+    # webhook (or a payment confirmed before the ledger link existed)
+    # already carries its group and is never double-booked.
+    ledger_group = None
+    if (payment.status == PaymentStatus.SUCCESS and payment.order is not None):
+        ledger_group = fulfillment.post_order_sale_ledger(
+            db, payment.order, payment.method, payment=payment)
+    return {"updated": True, "ledger_transaction_group": ledger_group}
 
 
 class CashConfirmRequest(BaseModel):
     order_id: str
+    # How the money arrived. "upi" is the dashboard's "Paid via UPI" button:
+    # same single settle path, only the recorded method differs.
+    method: str = "cash"
 
 
 def _mark_payment_paid(db: Session, order: Order, method: str) -> dict:
-    """Settle an order's payment — money in hand (cash) or UPI received.
-    Shared by the dashboard's confirm endpoint (session-authenticated) and
-    the Telegram inline-keyboard tap (chat-binding authenticated; its
-    caller has already verified the order belongs to that shop either way).
-    Idempotent: an already-successful payment is reported, never
-    double-counted. Returns the endpoint response shape."""
-    payment = order.payment
-    if payment is not None and payment.status == PaymentStatus.SUCCESS:
-        return {"updated": False, "already_confirmed": True, "method": payment.method}
-
-    before = payment.status.value if payment else None
-    if payment is None:
-        payment = Payment(
-            order_id=order.id,
-            transaction_ref=f"{method.upper()}-{uuid.uuid4().hex[:12].upper()}",
-            upi_deep_link="",  # no PSP link exists for money-in-hand
-            amount=order.total_amount,
-            status=PaymentStatus.SUCCESS,
-            method=method,
-        )
-        db.add(payment)
-        db.flush()
-    else:
-        payment.status = PaymentStatus.SUCCESS
-        payment.method = method
-    record_audit(
-        db,
-        action="payment_status_changed",
-        object_type="payment",
-        object_id=payment.id,
-        merchant_id=order.merchant_id,
-        actor_type="api",
-        before={"status": before},
-        after={"status": payment.status.value, "method": method},
-    )
-    return {"updated": True, "method": method, "transaction_ref": payment.transaction_ref}
+    """Settle an order's payment — shared by the dashboard's confirm endpoint
+    (session-authenticated) and the Telegram inline-keyboard tap (chat-binding
+    authenticated; its caller has already verified the order belongs to that
+    shop either way). Delegates to services/fulfillment so the payment record,
+    the Sales ledger row and the buyer's bill all land through ONE path."""
+    return fulfillment.mark_payment_paid(db, order, method)
 
 
 @router.post("/payments/cash")
@@ -376,7 +369,8 @@ def confirm_cash_payment(
         raise HTTPException(404, "Unknown order")
     if order.merchant_id != merchant.id:
         raise HTTPException(403, "This order belongs to a different shop")
-    return _mark_payment_paid(db, order, "cash")
+    method = payload.method if payload.method in ("cash", "upi") else "cash"
+    return _mark_payment_paid(db, order, method)
 
 
 def _tg_reply(chat_id: str | None, body: str) -> None:
@@ -470,6 +464,116 @@ def _status_text(db: Session, shop: Merchant) -> str:
         if awaiting else "Nothing awaiting payment. ✓"
     )
     return "\n".join(lines)
+
+
+def _storefront_ack(status: str, **extra) -> dict:
+    """The flat result shape a storefront ORDER-NO returns: intake-shaped so
+    both webhook wrappers can carry it under 'order' without reshaping."""
+    base = {
+        "order_id": None,
+        "status": status,           # rate_limited | chooser_sent | no_shop
+        "total_amount": 0.0,
+        "discount_amount": 0.0,
+        "offer": None,
+        "upi_link": None,
+        "qr_sent": False,
+        "parse_confidence": None,
+        "notify_error": None,
+    }
+    base.update(extra)
+    return base
+
+
+def _storefront_order(db: Session, channel: str, buyer_chat: str, msg: dict) -> dict:
+    """A PUBLIC buyer ordering on the shop's bot: their chat belongs to no
+    shop. Text orders are routed to the shop the buyer named ("send sugar
+    from Sharma Store") or, when exactly one shop is live, to it — with a
+    one-key-per-press chooser when several shops match and the text is
+    ambiguous. Every buyer-facing reply goes back to the BUYER's chat; the
+    owner's chat only receives the order card and settle buttons.
+    A rate limit caps how many orders one buyer chat can start per hour.
+    Returns the intake-shaped order dict (plus a storefront marker) — the
+    callers wrap it in their usual webhook response shapes.
+    """
+    if not buyer_chat:
+        return _storefront_ack("no_shop", storefront=True)
+    if order_intake.buyer_rate_limited(db, channel, buyer_chat):
+        channelsvc.send(
+            channel, buyer_chat,
+            "You've placed quite a few orders in the last hour — the shop "
+            "needs a moment. Please try again a bit later.",
+        )
+        return _storefront_ack("rate_limited", storefront=True, rate_limited=True)
+    if msg["kind"] == "text":
+        shops = fulfillment.public_shops(db, channel)
+        if not shops:
+            return _storefront_ack("no_shop", storefront=True)
+        if len(shops) == 1:
+            shop, cleaned = shops[0], msg["text"]
+        else:
+            # The shop TEXT names ("2 kg sugar from shukla gift store"), else
+            # the shop this chat is REMEMBERED to be ordering from — the
+            # buyer picks once and every later order routes there without
+            # naming the shop again.
+            shop, _phrase, cleaned = fulfillment.match_shop_in_text(shops, msg["text"])
+            if shop is None:
+                shop = fulfillment.recall_shop(db, channel, buyer_chat, shops)
+                cleaned = msg["text"]
+        if shop is None:
+            channelsvc.send(channel, buyer_chat, fulfillment.shop_list_text(shops))
+            return _storefront_ack("chooser_sent", storefront=True, chooser=True)
+        # A message that names the shop but has no items is the SELECTION:
+        # remember it and show the home screen, don't error out on chatter.
+        if not parse_order_text(cleaned).line_items:
+            just_picked = fulfillment.match_shop_in_text(shops, msg["text"])[0] is not None
+            if just_picked or len(shops) > 1:
+                fulfillment.remember_shop(db, channel, buyer_chat, shop)
+                biz = shop.business_name or "the shop"
+                channelsvc.send(
+                    channel, buyer_chat,
+                    f"🌟 Welcome to {biz}! Order by typing it like "
+                    "\"2 kg sugar and 1 soap\"\n"
+                    "— a voice note or a photo of a written list works too. "
+                    "You'll immediately get the total and a payment QR; "
+                    "once it's packed you'll be told, and after paying you "
+                    "get the bill right here. 🛍",
+                )
+                return _storefront_ack("shop_selected", storefront=True,
+                                       shop_name=shop.business_name)
+        fulfillment.remember_shop(db, channel, buyer_chat, shop)
+        result = order_intake.parse_and_create(
+            db, shop, buyer_chat, cleaned, reply_channel=channel,
+            buyer_channel=channel, buyer_chat_id=buyer_chat,
+        )
+        result["storefront"] = True
+        return result
+    return _storefront_media_order(db, channel, buyer_chat, msg)
+
+
+def _storefront_media_order(db: Session, channel: str, buyer_chat: str, msg: dict) -> dict:
+    """A public buyer's voice note / order photo. A shop name can't be read
+    out of audio until it is transcribed, and a photo's OCR text is only
+    available after download, so: exactly one live shop, or the chat's
+    REMEMBERED shop → it receives the order; otherwise the bot asks the
+    buyer to name their shop (type or say "from <shop name>"). Returns the
+    shared voice/photo handler's response shape unchanged."""
+    shops = fulfillment.public_shops(db, channel)
+    shop = shops[0] if len(shops) == 1 else fulfillment.recall_shop(
+        db, channel, buyer_chat, shops)
+    if shop is not None:
+        if msg["kind"] == "audio":
+            return _handle_voice_order(
+                db, shop, buyer_chat, msg, channel=channel,
+                buyer_channel=channel, buyer_chat_id=buyer_chat,
+            )
+        return _handle_photo_order(
+            db, shop, buyer_chat, msg, channel=channel,
+            buyer_channel=channel, buyer_chat_id=buyer_chat,
+        )
+    if len(shops) > 1:
+        channelsvc.send(channel, buyer_chat, fulfillment.shop_list_text(shops))
+        return {"received": True, "handled": True, "source": "storefront", "chooser": True}
+    return {"received": True, "handled": False}
 
 
 def _handle_telegram_command(db: Session, name: str, arg: str,
@@ -578,12 +682,15 @@ def _handle_telegram_text(db: Session, text: str, chat_id: str | None) -> bool:
     if command is not None:
         return _handle_telegram_command(db, command[0], command[1], chat_id)
 
-    # --- orders from a shop's linked Telegram chat -------------------------
+    # --- orders: the shop's linked chat, then public storefront buyers -----
     if chat_id:
         shop = order_intake.resolve_merchant_for_chat(db, "telegram", chat_id)
         if shop is not None:
             result = order_intake.parse_and_create(db, shop, chat_id, text, reply_channel="telegram")
             return result
+        # No shop owns this chat: a PUBLIC buyer ordering on the storefront.
+        # _handle_telegram_text's dict contract ALREADY wraps as "order": ...
+        return _storefront_order(db, "telegram", chat_id, {"kind": "text", "text": text})
 
     return False
 
@@ -607,7 +714,7 @@ def _handle_telegram_callback(db: Session, update: dict) -> dict:
 
     action, _, order_id = tap["data"].partition(":")
     shop = order_intake.resolve_merchant_for_chat(db, "telegram", tap["chat_id"])
-    if shop is None or action not in ("cash", "paid") or not order_id:
+    if shop is None or action not in ("cash", "paid", "avail", "oos") or not order_id:
         _answer("This chat can't confirm payments.", alert=True)
         return {"received": True, "handled": False}
 
@@ -615,6 +722,40 @@ def _handle_telegram_callback(db: Session, update: dict) -> dict:
     if order is None or order.merchant_id != shop.id:
         _answer("Unknown order — it doesn't belong to this shop.", alert=True)
         return {"received": True, "handled": False}
+
+    # --- availability verification (owner's all available / none available cards) ---
+    if action in ("avail", "oos"):
+        if order.status != OrderStatus.RECEIVED:
+            # Recognized + answered, so it IS handled (same contract as the
+            # payment "already confirmed" branch below); only refusals where
+            # the tap isn't ours to act on report handled=False.
+            _answer(f"Order is already {order.status.value} — the verify cards are for fresh orders only.", alert=True)
+            return {"received": True, "handled": True,
+                    "availability": {"updated": False, "already_verified": True,
+                                     "status": order.status.value}}
+        missing = [] if action == "avail" else ["all"]
+        result = fulfillment.verify_order_availability(db, order, missing)
+        if result.get("updated"):
+            stamp = ("✅ All available — buyer gets the total + payment QR."
+                     if action == "avail"
+                     else "❌ Marked unavailable — buyer told, no payment QR.")
+            _answer(stamp, alert=False)
+            if tap.get("message_id") is not None:
+                try:
+                    # The adapter already strips the keyboard (it always
+                    # sends an empty inline_keyboard), so three arguments
+                    # are all it takes.
+                    telegram.edit_message_text(
+                        tap["chat_id"],
+                        tap["message_id"],
+                        tap["text"] + chr(10) + chr(10) + stamp,
+                    )
+                except (UpstreamError, NotConfiguredError):
+                    pass
+            return {"received": True, "handled": True, "availability": result}
+        else:
+            _answer(result.get("reason", "Verification didn't apply."), alert=True)
+            return {"received": True, "handled": False}
 
     method = "cash" if action == "cash" else "upi"
     result = _mark_payment_paid(db, order, method)
@@ -631,7 +772,7 @@ def _handle_telegram_callback(db: Session, update: dict) -> dict:
             # Editing without a keyboard removes the buttons, so the same
             # tap can't be answered twice from the chat.
             telegram.edit_message_text(
-                tap["chat_id"], tap["message_id"], f"{tap['text']}\n\n{stamp}.",
+                tap["chat_id"], tap["message_id"], f"{tap['text']}" + chr(10) + chr(10) + stamp + ".",
             )
         except (UpstreamError, NotConfiguredError):
             pass  # the confirmation itself already landed in the DB
@@ -658,11 +799,12 @@ def _handle_telegram_update(db: Session, update: dict) -> dict:
         # WhatsApp uses (shared handlers above), repaid on this same chat.
         chat_id = msg["chat_id"]
         shop = order_intake.resolve_merchant_for_chat(db, "telegram", chat_id)
-        if shop is None:
-            return {"received": True, "handled": False}
-        if msg["kind"] == "audio":
-            return _handle_voice_order(db, shop, chat_id, msg, channel="telegram")
-        return _handle_photo_order(db, shop, chat_id, msg, channel="telegram")
+        if shop is not None:
+            if msg["kind"] == "audio":
+                return _handle_voice_order(db, shop, chat_id, msg, channel="telegram")
+            return _handle_photo_order(db, shop, chat_id, msg, channel="telegram")
+        # No shop owns this chat: a PUBLIC buyer ordering on the storefront.
+        return _storefront_media_order(db, "telegram", chat_id, msg)
 
     handled = _handle_telegram_text(db, msg["text"], msg["chat_id"])
     if isinstance(handled, dict):

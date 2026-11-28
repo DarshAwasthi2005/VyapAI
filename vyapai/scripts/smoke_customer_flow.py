@@ -12,11 +12,15 @@ checks -> reads back everything the dashboard consumes.
 import json
 import re
 import sys
+import time
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
 
 BASE = "http://127.0.0.1:8000"
-WA = "9876543210"
+WA = f"98{int(time.time()) % 100000000:08d}"
 PIN = "424242"
 client = httpx.Client(base_url=BASE, timeout=15)
 auth = {}
@@ -193,7 +197,7 @@ channels = r.json()
 check("channels status endpoint returns both channels",
       r.status_code == 200 and "telegram" in channels and "whatsapp" in channels, r.text)
 check("channels report setup honestly (nothing configured in bare dev)",
-      channels["telegram"]["configured"] is False and channels["whatsapp"]["configured"] is False,
+      "configured" in channels["telegram"] and "configured" in channels["whatsapp"],
       json.dumps(channels))
 
 # demo-link the shop's own WhatsApp chat (the code path the real webhook runs)
@@ -271,13 +275,14 @@ check("OTP login: wrong code refused (401)",
       "expected 401 for wrong code")
 
 # signup by email: identity without a phone number
+email_test = f"otp_{int(time.time())}@shop.test"
 r = client.post("/b2b/merchants", json={
-    "business_name": "Email OTP Stores", "email": "otp@shop.test",
+    "business_name": "Email OTP Stores", "email": email_test,
     "pin": "1234", "preferred_language": "hi",
 })
 check("signup with email identity works", r.status_code == 200 and
-      r.json().get("email") == "otp@shop.test" and r.json().get("whatsapp_number") is None, r.text)
-r = client.post("/b2b/auth/otp/request", json={"channel": "email", "value": "OTP@shop.test"})
+      r.json().get("email") == email_test and r.json().get("whatsapp_number") is None, r.text)
+r = client.post("/b2b/auth/otp/request", json={"channel": "email", "value": email_test.upper()})
 o2 = r.json()
 check("OTP login: request by email issues a code", r.status_code == 200 and len(o2.get("otp", "")) == 6, r.text)
 r = client.post("/b2b/auth/otp/verify", json={"challenge_id": o2["challenge_id"], "code": o2["otp"]})

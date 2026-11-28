@@ -25,7 +25,12 @@ import base64
 import io
 import json
 import os
+import sys
 import wave
+from pathlib import Path
+
+# Allow direct execution: python scripts/vosk_asr_server.py
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
